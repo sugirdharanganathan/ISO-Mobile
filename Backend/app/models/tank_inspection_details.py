@@ -63,6 +63,9 @@ class TankInspectionDetails(Base):
     # Optional inspection notes
     notes = Column(Text)
 
+    # Lifter weight photo path (optional) - stores relative path under uploads/<tank_number>/...
+    lifter_weight = Column(String(255), nullable=True)
+
     # Operator fields (auto-filled when operator_id is set)
     operator_id = Column(Integer, nullable=True, index=True)  # FK to users.emp_id
     operator_name = Column(String(100), nullable=True)  # Auto-filled from users.name

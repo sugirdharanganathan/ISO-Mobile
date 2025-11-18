@@ -1,16 +1,29 @@
 
-from fastapi import APIRouter, HTTPException, Depends, status
+
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from datetime import datetime
+import os
+import uuid
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+import os
+import uuid
 from decimal import Decimal
 import logging
 
 from app.database import get_db_connection, get_db
 from app.models.tank_inspection_details import TankInspectionDetails
-from app.models.user_model import User
+from app.models.tank_images_model import TankImages
+from app.models.inspection_checklist_model import InspectionChecklist
+from app.models.to_do_list_model import ToDoList
+from app.models.inspection_report_model import InspectionReport
+from app.models.users_model import User
 from app.schemas.tank_inspection import (
     TankInspectionCreate,
     TankInspectionResponse,
@@ -19,6 +32,40 @@ from pymysql.cursors import DictCursor
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tank_inspection_checklist", tags=["tank_inspection"])
+
+# Upload directory (same as other upload handlers)
+UPLOAD_DIR = "uploads"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
+
+
+def _save_lifter_file(file: UploadFile, tank_number: str) -> dict:
+    """Save lifter weight image and thumbnail. Returns dict with image_path, thumbnail_path."""
+    file_extension = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
+    unique_filename = f"{tank_number}_lifter_weight_{uuid.uuid4().hex}{file_extension}"
+    tank_dir = os.path.join(UPLOAD_DIR, tank_number)
+    os.makedirs(tank_dir, exist_ok=True)
+    dst = os.path.join(tank_dir, unique_filename)
+    # write contents
+    with open(dst, "wb") as buf:
+        buf.write(file.file.read())
+    image_path = f"{tank_number}/{unique_filename}"
+
+    # Generate thumbnail if Pillow available
+    thumb_rel = None
+    if Image is not None:
+        try:
+            thumb_name = f"{tank_number}_lifter_weight_{uuid.uuid4().hex}_thumb.jpg"
+            thumb_path = os.path.join(tank_dir, thumb_name)
+            with Image.open(dst) as img:
+                img.thumbnail((200, 200))
+                img.convert("RGB").save(thumb_path, format="JPEG")
+            thumb_rel = f"{tank_number}/{thumb_name}"
+        except Exception as e:
+            print(f"Warning: thumbnail generation failed for {dst}: {e}")
+
+    return {"image_path": image_path, "thumbnail_path": thumb_rel}
+
 
 class GenericResponse(BaseModel):
     success: bool
@@ -239,7 +286,26 @@ def validate_tank_exists(db: Session, tank_number: str):
             detail=f"Tank not existing: {tank_number}"
         )
 
+@router.get("/lifter_weight/{inspection_id}")
+def get_lifter_weight_thumbnail(inspection_id: int, db: Session = Depends(get_db)):
+    """Get the thumbnail path for the lifter weight photo for a given inspection."""
+    inspection = db.query(TankInspectionDetails).filter(TankInspectionDetails.inspection_id == inspection_id).first()
+    if not inspection or not inspection.lifter_weight:
+        raise HTTPException(status_code=404, detail="No lifter weight photo found for this inspection.")
 
+    rel_path = inspection.lifter_weight
+    folder = os.path.dirname(rel_path)
+    tank_number = folder
+    folder_abs = os.path.join(UPLOAD_DIR, folder)
+    thumb = None
+    if os.path.isdir(folder_abs):
+        # Find any file matching <tank_number>_lifter_weight_*_thumb.jpg
+        candidates = [fn for fn in os.listdir(folder_abs) if fn.startswith(f"{tank_number}_lifter_weight_") and fn.endswith("_thumb.jpg")]
+        if candidates:
+            # If multiple, pick the most recently modified
+            candidates.sort(key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)), reverse=True)
+            thumb = f"{folder}/{candidates[0]}"
+    return {"inspection_id": inspection_id, "thumbnail_path": thumb}
 # ============================================================================
 # Endpoint: Create Tank Inspection
 # ============================================================================
@@ -543,3 +609,295 @@ def delete_tank_inspection(inspection_id: int, db: Session = Depends(get_db)):
         db.rollback()
         logger.error(f"Error deleting inspection {inspection_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post("/{inspection_id}/lifter_weight")
+def upload_lifter_weight(inspection_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload lifter weight photo for an inspection and store path in `lifter_weight` column.
+
+    - `inspection_id` path param identifies the inspection record.
+    - Request must be multipart/form-data with `file`.
+    """
+    try:
+        # Fetch inspection
+        inspection = db.query(TankInspectionDetails).filter(TankInspectionDetails.inspection_id == inspection_id).first()
+        if not inspection:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Inspection {inspection_id} not found")
+
+        # Basic validation
+        if not file.content_type or not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File must be an image")
+
+        # Save file
+
+        saved = _save_lifter_file(file, inspection.tank_number)
+        rel_path = saved["image_path"]
+        thumb_path = saved["thumbnail_path"]
+
+        # If there was an existing file, try to remove it and its thumbnail
+        try:
+            if inspection.lifter_weight:
+                old_path = os.path.join(UPLOAD_DIR, *inspection.lifter_weight.split("/"))
+                if os.path.exists(old_path):
+                    os.remove(old_path)
+                # Remove old thumbnail if present
+                old_base = os.path.splitext(os.path.basename(old_path))[0]
+                folder = os.path.dirname(old_path)
+                if os.path.isdir(folder):
+                    for fn in os.listdir(folder):
+                        if 'thumb' in fn and old_base in fn:
+                            try:
+                                os.remove(os.path.join(folder, fn))
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        # Update record
+        inspection.lifter_weight = rel_path
+        inspection.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(inspection)
+
+        return {"success": True, "message": "Lifter weight photo uploaded", "data": {"inspection_id": inspection_id, "lifter_weight": rel_path, "thumbnail": thumb_path}}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error uploading lifter weight for inspection {inspection_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get("/review/{inspection_id}")
+def get_inspection_review(inspection_id: int, db: Session = Depends(get_db)):
+    """Return a review report combining tank_inspection_details, tank_images (image_type + thumbnail), inspection_checklist and to_do_list for the given inspection_id."""
+    inspection = db.query(TankInspectionDetails).filter(TankInspectionDetails.inspection_id == inspection_id).first()
+    if not inspection:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+
+    # Build inspection details dict excluding created_at/updated_at
+    insp = inspection.as_dict if hasattr(inspection, 'as_dict') else None
+    if insp is None:
+        # fallback: construct manually
+        insp = {c.name: getattr(inspection, c.name) for c in inspection.__table__.columns}
+    insp.pop('created_at', None)
+    insp.pop('updated_at', None)
+
+    # lifter weight thumbnail detection
+    lifter_thumb = None
+    try:
+        if inspection.lifter_weight:
+            folder = os.path.dirname(inspection.lifter_weight)
+            tank_number = folder
+            folder_abs = os.path.join(UPLOAD_DIR, folder)
+            if os.path.isdir(folder_abs):
+                candidates = [fn for fn in os.listdir(folder_abs) if fn.startswith(f"{tank_number}_lifter_weight_") and fn.endswith("_thumb.jpg")]
+                if candidates:
+                    candidates.sort(key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)), reverse=True)
+                    lifter_thumb = f"{folder}/{candidates[0]}"
+    except Exception:
+        lifter_thumb = None
+    insp['lifter_weight_thumbnail'] = lifter_thumb
+
+    # Images: find images for tank and date
+    images_out = []
+    try:
+        tank_number = inspection.tank_number
+        insp_date = inspection.inspection_date.date() if inspection.inspection_date else None
+
+        # Attempt to load DB records for images (if any) to keep behaviour consistent,
+        # but ultimately we will scan the uploads folder for available thumbnails grouped by image_type.
+        try:
+            if insp_date:
+                imgs = db.query(TankImages).filter(TankImages.tank_number == tank_number, TankImages.created_date == insp_date).all()
+            else:
+                imgs = db.query(TankImages).filter(TankImages.tank_number == tank_number).all()
+        except Exception:
+            imgs = []
+
+        # Only include image_types present in the tank_images table for this inspection (exclude lifter_weight)
+        # For each image_type, find the most recent thumbnail or return null if not present
+        # Get all tank_images for this inspection (by tank_number and created_date)
+        if insp_date:
+            imgs = db.query(TankImages).filter(TankImages.tank_number == tank_number, TankImages.created_date == insp_date).all()
+        else:
+            imgs = db.query(TankImages).filter(TankImages.tank_number == tank_number).all()
+
+        # For each image row (excluding lifter_weight), find the thumbnail or set null
+        tank_images_list = []
+        folder_abs = os.path.join(UPLOAD_DIR, tank_number)
+        for im in imgs:
+            img_type = im.image_type
+            if not img_type or img_type.lower() == "lifter_weight":
+                continue
+            thumb_path = None
+            if os.path.isdir(folder_abs):
+                # Find any file matching <tank_number>_<image_type>_*_thumb.jpg
+                prefix = f"{tank_number}_{img_type}_"
+                candidates = [fn for fn in os.listdir(folder_abs) if fn.startswith(prefix) and fn.endswith("_thumb.jpg")]
+                if candidates:
+                    # Pick the most recently modified
+                    candidates.sort(key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)), reverse=True)
+                    thumb_path = f"{tank_number}/{candidates[0]}"
+            tank_images_list.append({"image_type": img_type, "thumbnail_path": thumb_path})
+    except Exception:
+        images_out = []
+
+    # Find related inspection_report for checklist and todo using tank_number + date
+    checklist_out = []
+    todo_out = []
+    try:
+        report = None
+        if inspection.inspection_date and inspection.tank_number:
+            insp_date_str = inspection.inspection_date.date().isoformat()
+            report = db.query(InspectionReport).filter(InspectionReport.tank_number == inspection.tank_number, InspectionReport.inspection_date == insp_date_str).first()
+        if report:
+            report_id = report.id
+            # fetch checklist items
+            rows = db.query(InspectionChecklist).filter(InspectionChecklist.report_id == report_id).all()
+            for r in rows:
+                checklist_out.append({"job_name": r.job_name, "sub_job_name": r.sub_job_description, "status": r.status, "comment": r.comment})
+
+            # fetch todo items
+            todos = db.query(ToDoList).filter(ToDoList.report_id == report_id).all()
+            for t in todos:
+                todo_out.append({"job_name": t.job_name, "sub_job_name": t.sub_job_description, "status": t.status, "comment": t.comment})
+    except Exception:
+        checklist_out = []
+        todo_out = []
+
+    # include tank_images_list for convenience (may be empty)
+    try:
+        resp = {"inspection": insp, "images": images_out, "tank_images": tank_images_list, "inspection_checklist": checklist_out, "to_do_list": todo_out}
+    except Exception:
+        resp = {"inspection": insp, "images": images_out, "tank_images": [], "inspection_checklist": checklist_out, "to_do_list": todo_out}
+
+    return resp
+
+
+class ReviewUpdateModel(BaseModel):
+    inspection: Optional[dict] = None
+    checklist: Optional[List[dict]] = None
+    to_do: Optional[List[dict]] = None
+
+
+@router.put("/review/{inspection_id}")
+def update_inspection_review(inspection_id: int, payload: ReviewUpdateModel, db: Session = Depends(get_db)):
+    """Update inspection details, checklist items and to-do items for a review. Images are not handled here."""
+    inspection = db.query(TankInspectionDetails).filter(TankInspectionDetails.inspection_id == inspection_id).first()
+    if not inspection:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+
+    try:
+        # Update inspection fields
+        if payload.inspection:
+            for k, v in payload.inspection.items():
+                if k in ("created_at", "updated_at", "inspection_id"):
+                    continue
+                if hasattr(inspection, k):
+                    setattr(inspection, k, v)
+
+        # Find related report if exists
+        report = None
+        if inspection.inspection_date and inspection.tank_number:
+            insp_date_str = inspection.inspection_date.date().isoformat()
+            report = db.query(InspectionReport).filter(InspectionReport.tank_number == inspection.tank_number, InspectionReport.inspection_date == insp_date_str).first()
+
+        # Update checklist items
+        if payload.checklist and report:
+            for item in payload.checklist:
+                # require either id or sn
+                if 'id' in item and item['id']:
+                    chk = db.query(InspectionChecklist).filter(InspectionChecklist.id == item['id']).first()
+                else:
+                    # try match by report_id and sn if provided
+                    chk = None
+                    if 'sn' in item:
+                        chk = db.query(InspectionChecklist).filter(InspectionChecklist.report_id == report.id, InspectionChecklist.sn == item['sn']).first()
+                if not chk:
+                    continue
+                if 'job_name' in item:
+                    chk.job_name = item['job_name']
+                if 'sub_job_name' in item:
+                    chk.sub_job_description = item['sub_job_name']
+                if 'status' in item:
+                    chk.status = item['status']
+                if 'comment' in item:
+                    chk.comment = item['comment']
+                # flagged sync
+                chk.flagged = bool(chk.comment and str(chk.comment).strip() != "")
+
+                # sync to to_do_list
+                if chk.flagged:
+                    # upsert to to_do_list
+                    existing = db.query(ToDoList).filter(ToDoList.checklist_id == chk.id).first()
+                    if existing:
+                        existing.job_name = chk.job_name
+                        existing.sub_job_description = chk.sub_job_description
+                        existing.status = chk.status
+                        existing.comment = chk.comment
+                    else:
+                        nd = ToDoList()
+                        nd.checklist_id = chk.id
+                        nd.report_id = chk.report_id
+                        nd.tank_number = chk.tank_number
+                        nd.job_name = chk.job_name
+                        nd.sub_job_description = chk.sub_job_description
+                        nd.sn = chk.sn
+                        nd.status = chk.status
+                        nd.comment = chk.comment
+                        db.add(nd)
+                else:
+                    # remove from to_do_list if exists
+                    db.query(ToDoList).filter(ToDoList.checklist_id == chk.id).delete()
+
+        # Update to_do items directly
+        if payload.to_do and report:
+            for t in payload.to_do:
+                if 'id' in t and t['id']:
+                    td = db.query(ToDoList).filter(ToDoList.id == t['id']).first()
+                    if not td:
+                        continue
+                    if 'job_name' in t:
+                        td.job_name = t['job_name']
+                    if 'sub_job_name' in t:
+                        td.sub_job_description = t['sub_job_name']
+                    if 'status' in t:
+                        td.status = t['status']
+                    if 'comment' in t:
+                        td.comment = t['comment']
+
+        db.commit()
+        db.refresh(inspection)
+        return {"success": True, "message": "Review updated"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating review for {inspection_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/review/{inspection_id}")
+def delete_inspection_review(inspection_id: int, db: Session = Depends(get_db)):
+    """Delete an inspection and associated report, checklist and to-do entries. Does not delete images."""
+    inspection = db.query(TankInspectionDetails).filter(TankInspectionDetails.inspection_id == inspection_id).first()
+    if not inspection:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+    try:
+        report = None
+        if inspection.inspection_date and inspection.tank_number:
+            insp_date_str = inspection.inspection_date.date().isoformat()
+            report = db.query(InspectionReport).filter(InspectionReport.tank_number == inspection.tank_number, InspectionReport.inspection_date == insp_date_str).first()
+        if report:
+            # delete checklists and todos
+            db.query(InspectionChecklist).filter(InspectionChecklist.report_id == report.id).delete()
+            db.query(ToDoList).filter(ToDoList.report_id == report.id).delete()
+            db.delete(report)
+
+        db.delete(inspection)
+        db.commit()
+        return {"success": True, "message": "Inspection and related report/checklist/to-do entries deleted"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting review for {inspection_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
