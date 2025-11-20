@@ -1,8 +1,8 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text
-from sqlalchemy.orm import declarative_base
 from datetime import datetime
 
-Base = declarative_base()
+# ✅ use the shared Base from database.py
+from app.database import Base
 
 
 class ToDoList(Base):
@@ -19,7 +19,7 @@ class ToDoList(Base):
     status = Column(String(32), nullable=True)
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    
+
     def as_dict(self):
         """Convert to dictionary for JSON serialization"""
         return {

@@ -11,6 +11,7 @@ init_db()
 
 app = FastAPI(title="ISO Tank API", version="1.0.0")
 
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,

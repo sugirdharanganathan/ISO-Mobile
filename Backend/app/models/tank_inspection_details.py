@@ -3,7 +3,7 @@ SQLAlchemy model for tank_inspection_details table.
 Stores inspection records with denormalized fields from tank_details and tank_mobile
 for performance and audit traceability.
 """
-
+from typing import Optional
 from sqlalchemy import (
     Column, Integer, String, Numeric, Text, DateTime, Date,
     func, Index
@@ -46,9 +46,9 @@ class TankInspectionDetails(Base):
     location_id = Column(Integer, nullable=False)
 
     # Auto-filled from tank_details (denormalized)
-    working_pressure = Column(Numeric(12, 2))
+    working_pressure = Column(Numeric(12, 2)) 
+    design_temperature = Column(Numeric(12, 2)) 
     frame_type = Column(String(255))
-    design_temperature = Column(String(100))
     cabinet_type = Column(String(255))
     mfgr = Column(String(255))  # Tank Manufacturer
 

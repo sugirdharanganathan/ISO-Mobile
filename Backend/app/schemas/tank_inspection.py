@@ -4,35 +4,33 @@ from datetime import datetime
 
 
 class TankInspectionCreate(BaseModel):
-    """Schema for creating a new tank inspection"""
-    tank_number: str
-    status_name: str
+    created_by: str
     inspection_type_name: str
-    product_name: str
     location_name: str
+    notes: Optional[str] = None
+    operator_id: Optional[int] = None
+    product_name: str
     safety_valve_brand: Optional[str] = None
     safety_valve_model: Optional[str] = None
     safety_valve_size: Optional[str] = None
-    notes: Optional[str] = None
-    inspection_date: Optional[datetime] = None
-    created_by: Optional[str] = None
-    operator_id: Optional[int] = None
+    status_name: str
+    tank_number: str
+
 
     class Config:
         json_schema_extra = {
             "example": {
-                "tank_number": "TK001",
-                "status_name": "Laden",
-                "inspection_type_name": "Incoming",
-                "product_name": "Liquid Argon",
-                "location_name": "SG-1 16A, Benoi Cresent",
-                "safety_valve_brand": "Brand A",
-                "safety_valve_model": "Model X",
-                "safety_valve_size": "3",
-                "notes": "All checks passed",
-                "inspection_date": "2025-11-18T10:00:00",
-                "created_by": "admin",
-                "operator_id": 1,
+                "tank_number": "",
+                "status_name": "",
+                "inspection_type_name": "",
+                "product_name": "",
+                "location_name": "",
+                "safety_valve_brand": "",
+                "safety_valve_model": "",
+                "safety_valve_size": "",
+                "notes": "",
+                "created_by": "",
+                "operator_id": None
             }
         }
 
@@ -47,9 +45,9 @@ class TankInspectionResponse(BaseModel):
     product_id: Optional[int] = None
     inspection_type_id: Optional[int] = None
     location_id: Optional[int] = None
-    working_pressure: Optional[str] = None
+    working_pressure: Optional[float] = None
+    design_temperature: Optional[float] = None
     frame_type: Optional[str] = None
-    design_temperature: Optional[str] = None
     cabinet_type: Optional[str] = None
     mfgr: Optional[str] = None
     pi_next_inspection_date: Optional[datetime] = None
@@ -63,6 +61,42 @@ class TankInspectionResponse(BaseModel):
     ownership: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+class TankInspectionUpdate(BaseModel):
+    """Request schema for updating a tank inspection record (supports partial updates)."""
+
+    # core / header fields
+    inspection_date: Optional[datetime] = None
+    tank_number: Optional[str] = None
+    # you can send either *_id or *_name (name will be mapped to id)
+    status_id: Optional[int] = None
+    status_name: Optional[str] = None
+
+    inspection_type_id: Optional[int] = None
+    inspection_type_name: Optional[str] = None
+
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
+
+    location_id: Optional[int] = None
+    location_name: Optional[str] = None
+
+    # tank_details-ish fields (allow override if needed)
+    working_pressure: Optional[float] = None
+    frame_type: Optional[str] = None
+    design_temperature: Optional[float] = None
+    cabinet_type: Optional[str] = None
+    mfgr: Optional[str] = None
+
+    # safety valve fields
+    safety_valve_brand: Optional[str] = None
+    safety_valve_model: Optional[str] = None
+    safety_valve_size: Optional[str] = None
+
+    # misc
+    notes: Optional[str] = None
+    operator_id: Optional[int] = None
+    ownership: Optional[str] = None  # "OWN" / "LEASED" if you ever want to override
 
     class Config:
         from_attributes = True
