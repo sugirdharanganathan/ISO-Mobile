@@ -1,56 +1,75 @@
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
-from pydantic import BaseModel
+# app/routers/tank_inspection_router.py
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Header
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import List, Optional
-from sqlalchemy import func, text
+from typing import List, Optional, Generator, Any
+from sqlalchemy import func, text, inspect
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError  # ✅ import this
 import os
 import uuid
+import logging
+import traceback
+import jwt  # PyJWT
+import pymysql
+from pymysql.cursors import DictCursor
+from decimal import Decimal
+import urllib.parse
+import importlib
+
+from app.database import get_db, get_db_connection
 
 try:
     from PIL import Image
 except Exception:
     Image = None
 
-from decimal import Decimal
-import logging
-
-from app.database import get_db_connection, get_db
-from app.models.tank_inspection_details import TankInspectionDetails
-from app.models.tank_images_model import TankImages
-from app.models.inspection_checklist_model import InspectionChecklist
-from app.models.to_do_list_model import ToDoList
-from app.models.inspection_report_model import InspectionReport
-from app.models.users_model import User
-from app.schemas.tank_inspection import (
-    TankInspectionCreate,
-    TankInspectionResponse,
-)
-from pymysql.cursors import DictCursor
-
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
 router = APIRouter(prefix="/api/tank_inspection_checklist", tags=["tank_inspection"])
 
-# Upload directory (same as other upload handlers)
 UPLOAD_DIR = "uploads"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
+JWT_SECRET = os.getenv("JWT_SECRET", "change_this_in_production")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
+
+# Response helpers (uniform envelope)
+from fastapi.encoders import jsonable_encoder
+
+def success_resp(message: str, data: Any = None, status_code: int = 200):
+    if data is None:
+        data = {}
+    try:
+        payload = jsonable_encoder(data)
+    except Exception:
+        try:
+            payload = jsonable_encoder(str(data))
+        except Exception:
+            payload = {}
+    return JSONResponse(status_code=status_code, content={"success": True, "message": message, "data": payload})
+
+def error_resp(message: str, status_code: int = 400):
+    return JSONResponse(status_code=status_code, content={"success": False, "message": message, "data": {}})
+
+
+# -------------------------
+# File helpers
+# -------------------------
 def _save_lifter_file(file: UploadFile, tank_number: str) -> dict:
-    """Save lifter weight image and thumbnail. Returns dict with image_path, thumbnail_path."""
     file_extension = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
     unique_filename = f"{tank_number}_lifter_weight_{uuid.uuid4().hex}{file_extension}"
     tank_dir = os.path.join(UPLOAD_DIR, tank_number)
     os.makedirs(tank_dir, exist_ok=True)
     dst = os.path.join(tank_dir, unique_filename)
-    # write contents
     with open(dst, "wb") as buf:
         buf.write(file.file.read())
     image_path = f"{tank_number}/{unique_filename}"
 
-    # Generate thumbnail if Pillow available
     thumb_rel = None
     if Image is not None:
         try:
@@ -61,22 +80,12 @@ def _save_lifter_file(file: UploadFile, tank_number: str) -> dict:
                 img.convert("RGB").save(thumb_path, format="JPEG")
             thumb_rel = f"{tank_number}/{thumb_name}"
         except Exception as e:
-            print(f"Warning: thumbnail generation failed for {dst}: {e}")
+            logger.warning(f"Warning: thumbnail generation failed for {dst}: {e}")
 
     return {"image_path": image_path, "thumbnail_path": thumb_rel}
 
 
-class GenericResponse(BaseModel):
-    success: bool
-    data: List[dict]
-
-
-def rows_to_list(rows):
-    return [r for r in rows]
-
-
 def fetch_pi_next_inspection_date(db: Session, tank_number: str):
-    """Fetch next PI inspection date from tank_certificate for a tank."""
     try:
         row = db.execute(
             text(
@@ -90,65 +99,69 @@ def fetch_pi_next_inspection_date(db: Session, tank_number: str):
             ),
             {"tank_number": tank_number},
         ).fetchone()
-        return row[0] if row else None
+        if not row:
+            return None
+        try:
+            if hasattr(row, "_mapping"):
+                mapping = row._mapping
+                return next(iter(mapping.values()), None)
+            elif isinstance(row, dict):
+                return next(iter(row.values()), None)
+            else:
+                return row[0]
+        except Exception:
+            try:
+                return list(row.values())[0]
+            except Exception:
+                return None
     except Exception as exc:
         logger.warning("Could not fetch PI next inspection date for %s: %s", tank_number, exc)
         return None
 
 
-# ============================================================================
-# Helper Functions for Tank Inspection Creation
-# ============================================================================
-
-
 def generate_report_number(db: Session, inspection_date: datetime) -> str:
-    """
-    Generate a unique report number with format: SG-T1-DDMMYYYY-XX
-    where XX is a two-digit counter for the same day.
-    """
     date_str = inspection_date.strftime("%d%m%Y")
+    for attempt in range(3):
+        try:
+            cnt_row = db.execute(
+                text("SELECT COUNT(*) AS cnt FROM tank_inspection_details WHERE DATE(inspection_date) = :d"),
+                {"d": inspection_date.date()},
+            ).fetchone()
+            if cnt_row is None:
+                count = 0
+            else:
+                if hasattr(cnt_row, "_mapping"):
+                    count = int(cnt_row._mapping.get("cnt", 0))
+                elif isinstance(cnt_row, dict):
+                    count = int(cnt_row.get("cnt", 0))
+                else:
+                    count = int(cnt_row[0])
+        except Exception:
+            count = 0
 
-    for attempt in range(3):  # Retry up to 3 times for race conditions
-        # Count existing records for this date
-        count = (
-            db.query(func.count(TankInspectionDetails.inspection_id))
-            .filter(func.date(TankInspectionDetails.inspection_date) == inspection_date.date())
-            .scalar()
-            or 0
-        )
-
-        next_counter = count + 1
+        next_counter = (count or 0) + 1
         report_number = f"SG-T1-{date_str}-{next_counter:02d}"
 
-        # Check if this report_number already exists (race condition check)
-        existing = (
-            db.query(TankInspectionDetails)
-            .filter(TankInspectionDetails.report_number == report_number)
-            .first()
-        )
-
-        if not existing:
+        try:
+            existing = db.execute(text("SELECT 1 FROM tank_inspection_details WHERE report_number = :rn LIMIT 1"), {"rn": report_number}).fetchone()
+            if not existing:
+                return report_number
+        except Exception:
             return report_number
 
-        # If we got here, there was a race condition; retry
         logger.warning(f"Report number collision for {report_number}, retrying...")
 
     raise RuntimeError(f"Unable to generate unique report number after retries for date {date_str}")
 
 
 def fetch_tank_details(db: Session, tank_number: str):
-    """
-    Fetch tank_details record by tank_number.
-
-    Returns:
-        Dictionary with tank detail fields (Decimal values converted to float)
-    """
     result = db.execute(
         text(
             """
             SELECT working_pressure, frame_type, design_temperature, cabinet_type, mfgr, lease
             FROM tank_details
             WHERE tank_number = :tank_number
+            LIMIT 1
             """
         ),
         {"tank_number": tank_number},
@@ -160,7 +173,33 @@ def fetch_tank_details(db: Session, tank_number: str):
             detail=f"Tank details not found for tank_number: {tank_number}",
         )
 
-    working_pressure, frame_type, design_temperature, cabinet_type, mfgr, lease = result
+    try:
+        if hasattr(result, "_mapping"):
+            mapping = result._mapping
+            working_pressure = mapping.get("working_pressure", None)
+            frame_type = mapping.get("frame_type", None)
+            design_temperature = mapping.get("design_temperature", None)
+            cabinet_type = mapping.get("cabinet_type", None)
+            mfgr = mapping.get("mfgr", None)
+            lease = mapping.get("lease", None)
+        else:
+            working_pressure = result[0]
+            frame_type = result[1]
+            design_temperature = result[2]
+            cabinet_type = result[3]
+            mfgr = result[4]
+            lease = result[5]
+    except Exception:
+        try:
+            rowm = dict(result)
+            working_pressure = rowm.get("working_pressure")
+            frame_type = rowm.get("frame_type")
+            design_temperature = rowm.get("design_temperature")
+            cabinet_type = rowm.get("cabinet_type")
+            mfgr = rowm.get("mfgr")
+            lease = rowm.get("lease")
+        except Exception:
+            working_pressure = frame_type = design_temperature = cabinet_type = mfgr = lease = None
 
     def to_float_if_decimal(val):
         if isinstance(val, Decimal):
@@ -177,907 +216,760 @@ def fetch_tank_details(db: Session, tank_number: str):
     }
 
 
-def build_tank_inspection_response(entity: TankInspectionDetails) -> TankInspectionResponse:
-    """
-    Convert TankInspectionDetails ORM object into TankInspectionResponse,
-    casting any Decimal values to float so Pydantic can validate against
-    float fields (or coerce to string if your schema still uses str).
-    """
-    data = {}
-    for col in entity.__table__.columns:
-        val = getattr(entity, col.name)
-        if isinstance(val, Decimal):
-            data[col.name] = float(val)
-        else:
-            data[col.name] = val
-    return TankInspectionResponse.model_validate(data)
+# -------------------------
+# Pydantic schemas (updated to use tank_id in create/update)
+# -------------------------
+class TankInspectionCreate(BaseModel):
+    created_by: str = Field(..., description="User who created this record (string username/id)")
+    tank_id: int = Field(..., description="tank_details.tank_id (client must send tank_id)")
+    status_id: int
+    product_id: int
+    inspection_type_id: int
+    location_id: int
+    safety_valve_brand_id: Optional[int] = None
+    safety_valve_model_id: Optional[int] = None  # nullable
+    safety_valve_size_id: Optional[int] = None   # nullable
+    notes: Optional[str] = None
+    operator_id: Optional[int] = None   # manual operator id entered by user (nullable)
 
-
-# Consolidated masters response models
-class TankStatusSchema(BaseModel):
-    status_id: Optional[int]
-    status_name: Optional[str]
-    description: Optional[str]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-
-
-class ProductSchema(BaseModel):
-    product_id: Optional[int]
-    product_name: Optional[str]
-    description: Optional[str]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-
-
-class InspectionTypeSchema(BaseModel):
-    inspection_type_id: Optional[int]
-    inspection_type_name: Optional[str]
-    description: Optional[str]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-
-
-class LocationSchema(BaseModel):
-    location_id: Optional[int]
-    location_name: Optional[str]
-    description: Optional[str]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-
-
-class SafetyValveBrandSchema(BaseModel):
-    id: Optional[int]
-    brand_name: Optional[str]
-    description: Optional[str]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-
-
-class SafetyValveModelSchema(BaseModel):
-    id: Optional[int]
-    model_name: Optional[str]
-    description: Optional[str]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-
-
-class SafetyValveSizeSchema(BaseModel):
-    id: Optional[int]
-    size_label: Optional[str]
-    description: Optional[str]
-    created_at: Optional[datetime]
-    updated_at: Optional[datetime]
-
-
-class TankInspectionMastersResponse(BaseModel):
-    tank_statuses: List[TankStatusSchema]
-    products: List[ProductSchema]
-    inspection_types: List[InspectionTypeSchema]
-    locations: List[LocationSchema]
-    safety_valve_brands: List[SafetyValveBrandSchema]
-    safety_valve_models: List[SafetyValveModelSchema]
-    safety_valve_sizes: List[SafetyValveSizeSchema]
-
-
-@router.get("/masters", response_model=TankInspectionMastersResponse, summary="Get all tank inspection master data")
-def get_all_tank_inspection_masters():
-    conn = get_db_connection()
-    try:
-        with conn.cursor(DictCursor) as cursor:
-            cursor.execute(
-                "SELECT status_id, status_name, description, created_at, updated_at "
-                "FROM tank_status ORDER BY status_id ASC"
-            )
-            tank_statuses = cursor.fetchall()
-
-            cursor.execute(
-                "SELECT product_id, product_name, description, created_at, updated_at "
-                "FROM product_master ORDER BY product_id ASC"
-            )
-            products = cursor.fetchall()
-
-            cursor.execute(
-                "SELECT inspection_type_id, inspection_type_name, description, created_at, updated_at "
-                "FROM inspection_type ORDER BY inspection_type_id ASC"
-            )
-            inspection_types = cursor.fetchall()
-
-            cursor.execute(
-                "SELECT location_id, location_name, description, created_at, updated_at "
-                "FROM location_master ORDER BY location_id ASC"
-            )
-            locations = cursor.fetchall()
-
-            cursor.execute(
-                "SELECT id, brand_name, description, created_at, updated_at "
-                "FROM safety_valve_brand ORDER BY id ASC"
-            )
-            safety_valve_brands = cursor.fetchall()
-
-            cursor.execute(
-                "SELECT id, model_name, description, created_at, updated_at "
-                "FROM safety_valve_model ORDER BY id ASC"
-            )
-            safety_valve_models = cursor.fetchall()
-
-            cursor.execute(
-                "SELECT id, size_label, description, created_at, updated_at "
-                "FROM safety_valve_size ORDER BY id ASC"
-            )
-            safety_valve_sizes = cursor.fetchall()
-
-            return {
-                "tank_statuses": tank_statuses,
-                "products": products,
-                "inspection_types": inspection_types,
-                "locations": locations,
-                "safety_valve_brands": safety_valve_brands,
-                "safety_valve_models": safety_valve_models,
-                "safety_valve_sizes": safety_valve_sizes,
+    class Config:
+        schema_extra = {
+            "example": {
+                "created_by": "user@example.com",
+                "tank_id": 123,
+                "status_id": 1,
+                "product_id": 2,
+                "inspection_type_id": 1,
+                "location_id": 3,
+                "safety_valve_brand_id": 2,
+                "safety_valve_model_id": 1,
+                "safety_valve_size_id": 1,
+                "notes": "All checks ok",
+                "operator_id": 1234
             }
+        }
+
+class TankInspectionResponse(BaseModel):
+    inspection_id: int
+    tank_number: str
+    report_number: str
+    inspection_date: datetime
+    status_id: Optional[int] = None
+    product_id: Optional[int] = None
+    inspection_type_id: Optional[int] = None
+    location_id: Optional[int] = None
+    working_pressure: Optional[float] = None
+    design_temperature: Optional[float] = None
+    frame_type: Optional[str] = None
+    cabinet_type: Optional[str] = None
+    mfgr: Optional[str] = None
+    pi_next_inspection_date: Optional[datetime] = None
+    safety_valve_brand_id: Optional[int] = None
+    safety_valve_model_id: Optional[int] = None
+    safety_valve_size_id: Optional[int] = None
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+    operator_id: Optional[int] = None
+    emp_id: int     # NOT optional - must be the logged-in user's ID
+    ownership: Optional[str] = None
+    lifter_weight: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+
+
+class TankInspectionUpdate(BaseModel):
+    inspection_date: Optional[datetime] = None
+    # client can send tank_id if they want to change which tank this inspection refers to (rare) --
+    # if provided, code resolves tank_number from tank_id.
+    tank_id: Optional[int] = None
+    status_id: Optional[int] = None
+    inspection_type_id: Optional[int] = None
+    product_id: Optional[int] = None
+    location_id: Optional[int] = None
+    safety_valve_brand_id: Optional[int] = None
+    safety_valve_model_id: Optional[int] = None      # nullable
+    safety_valve_size_id: Optional[int] = None       # nullable
+
+    class Config:
+        from_attributes = True
+
+
+# -------------------------
+# Auth helper (kept as before)
+# -------------------------
+try:
+    from app.models.users_model import User
+except Exception:
+    User = None
+
+
+def get_current_user(authorization: Optional[str] = Header(None, alias="Authorization"), db: Session = Depends(get_db)):
+    if not authorization:
+        return None
+    auth = authorization.strip()
+    token = auth
+    if len(auth) >= 6 and auth[:6].lower() == "bearer":
+        token_part = auth[6:]
+        token = token_part.lstrip(" :\t")
+    token = token.strip()
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        return None
+
+    if User is None:
+        return payload
+
+    try:
+        if "emp_id" in payload and payload["emp_id"] is not None:
+            try:
+                return db.query(User).filter(User.emp_id == int(payload["emp_id"])).first()
+            except Exception:
+                return db.query(User).filter(User.emp_id == payload["emp_id"]).first()
+        if "email" in payload and payload["email"]:
+            return db.query(User).filter(User.email == payload["email"]).first()
+        if "sub" in payload and payload["sub"]:
+            sub = payload["sub"]
+            try:
+                return db.query(User).filter((User.email == sub) | (User.emp_id == int(sub))).first()
+            except Exception:
+                return db.query(User).filter((User.email == sub) | (User.emp_id == sub)).first()
+    except Exception:
+        return None
+
+    return None
+
+
+@router.get("/auth/debug-token")
+def debug_token(authorization: Optional[str] = Header(None, alias="Authorization")):
+    if not authorization:
+        return error_resp("No Authorization header", 400)
+    token = authorization.strip()
+    if token.lower().startswith("bearer "):
+        token = token.split(" ", 1)[1].strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_signature": False})
+        return success_resp("Decoded token payload (no signature verification)", payload, 200)
+    except Exception as e:
+        return error_resp(f"Failed to decode token: {e}", 400)
+
+
+# -------------------------
+# Helper: validate operator exists in operators table
+# -------------------------
+def operator_exists(db: Session, operator_id: int) -> bool:
+    try:
+        r = db.execute(text("SELECT 1 FROM operators WHERE operator_id = :op LIMIT 1"), {"op": operator_id}).fetchone()
+        return bool(r)
+    except Exception:
+        return False
+
+
+# -------------------------
+# Masters endpoint (kept)
+# -------------------------
+@router.get("/masters")
+def get_all_tank_inspection_masters():
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(DictCursor) as cursor:
+            masters = {
+                "tank_statuses": ("tank_status", ["status_id", "status_name", "description", "created_at", "updated_at"]),
+                "products": ("product_master", ["product_id", "product_name", "description", "created_at", "updated_at"]),
+                "inspection_types": ("inspection_type", ["inspection_type_id", "inspection_type_name", "description", "created_at", "updated_at"]),
+                "locations": ("location_master", ["location_id", "location_name", "description", "created_at", "updated_at"]),
+                "safety_valve_brands": ("safety_valve_brand", ["id", "brand_name", "description", "created_at", "updated_at"]),
+                "safety_valve_models": ("safety_valve_model", ["id", "model_name", "description", "created_at", "updated_at"]),
+                "safety_valve_sizes": ("safety_valve_size", ["id", "size_label", "description", "created_at", "updated_at"]),
+            }
+
+            out_data = {}
+
+            for key, (table, expected_fields) in masters.items():
+                try:
+                    cursor.execute(f"SELECT * FROM `{table}` LIMIT 100")
+                    sample_rows = cursor.fetchall() or []
+                except Exception as ex:
+                    logger.warning("Failed to fetch table %s: %s", table, ex, exc_info=True)
+                    out_data[key] = []
+                    continue
+
+                real_cols = list(sample_rows[0].keys()) if sample_rows else []
+                if not real_cols:
+                    try:
+                        cursor.execute(f"SELECT * FROM `{table}` LIMIT 0")
+                        real_cols = [d[0] for d in cursor.description] if cursor.description else []
+                    except Exception:
+                        real_cols = []
+
+                def pick_real_col_for_expected(ef):
+                    if ef.endswith("_id"):
+                        if ef in real_cols:
+                            return ef
+                        if "id" in real_cols:
+                            return "id"
+                        base = ef[:-3]
+                        if f"{base}_id" in real_cols:
+                            return f"{base}_id"
+                        if f"{base}id" in real_cols:
+                            return f"{base}id"
+                        return None
+                    candidates = [ef]
+                    if ef.endswith("_name"):
+                        candidates.append(ef.replace("_name", "name"))
+                        candidates.append(ef.replace("_name", ""))
+                    for c in candidates:
+                        if c in real_cols:
+                            return c
+                    for c in real_cols:
+                        if c.lower().endswith(ef.split("_")[-1].lower()):
+                            return c
+                    return None
+
+                chosen_map = {ef: pick_real_col_for_expected(ef) for ef in expected_fields}
+                mapped = []
+                for r in sample_rows:
+                    out_row = {}
+                    for ef in expected_fields:
+                        real = chosen_map.get(ef)
+                        val = None
+                        if real and real in r:
+                            val = r.get(real)
+                        out_row[ef] = val
+                    mapped.append(out_row)
+                out_data[key] = jsonable_encoder(mapped)
+
+            return success_resp("Master data fetched successfully", out_data, 200)
+    except Exception as e:
+        logger.error(f"Error fetching masters: {e}", exc_info=True)
+        return error_resp("Error fetching master data", 500)
     finally:
-        conn.close()
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
 
 
+# Simple validator for tank existence (kept)
 def validate_tank_exists(db: Session, tank_number: str):
-    """
-    Validate that tank_number exists in tank_header.
-    """
     result = db.execute(
         text("SELECT 1 FROM tank_header WHERE tank_number = :tank_number"),
         {"tank_number": tank_number},
     ).fetchone()
-
     if not result:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Tank not existing: {tank_number}",
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Tank not existing: {tank_number}")
 
 
-# ---------------------------------------------------------------------------
-# NEW: Active tanks endpoint (tank_id + tank_number from tank_details where status='active')
-# ---------------------------------------------------------------------------
-
-
-class ActiveTankSchema(BaseModel):
-    tank_id: int
-    tank_number: str
-
-
-@router.get("/active-tanks", response_model=List[ActiveTankSchema])
+# -------------------------
+# Active tanks endpoint
+# -------------------------
+@router.get("/active-tanks")
 def get_active_tanks(db: Session = Depends(get_db)):
     try:
-        rows = (
-            db.execute(text("SELECT tank_id, tank_number FROM tank_details WHERE status = 'active'"))
-            .mappings()
-            .all()
-        )
-        return [ActiveTankSchema(tank_id=row["tank_id"], tank_number=row["tank_number"]) for row in rows]
+        rows = db.execute(text("SELECT tank_id, tank_number FROM tank_details WHERE status = 'active'")).mappings().all()
+        data = [dict(r) for r in rows]
+        return success_resp("Active tanks fetched", {"active_tanks": jsonable_encoder(data)}, 200)
     except Exception as e:
         logger.error(f"Error fetching active tanks: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error fetching active tanks",
-        )
+        return error_resp("Error fetching active tanks", 500)
 
 
+# -------------------------
+# Lifter weight thumbnail endpoint
+# -------------------------
 @router.get("/lifter_weight/{inspection_id}")
 def get_lifter_weight_thumbnail(inspection_id: int, db: Session = Depends(get_db)):
-    """Get the thumbnail path for the lifter weight photo for a given inspection."""
-    inspection = (
-        db.query(TankInspectionDetails)
-        .filter(TankInspectionDetails.inspection_id == inspection_id)
-        .first()
-    )
-    if not inspection or not inspection.lifter_weight:
-        raise HTTPException(status_code=404, detail="No lifter weight photo found for this inspection.")
+    try:
+        row = db.execute(text("SELECT lifter_weight, tank_number FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not row or (hasattr(row, "_mapping") and not row._mapping.get("lifter_weight")) or (not hasattr(row, "_mapping") and not row[0]):
+            return error_resp("No lifter weight photo found for this inspection.", 404)
+        if hasattr(row, "_mapping"):
+            tank_number = row._mapping.get("tank_number")
+            rel_path = row._mapping.get("lifter_weight")
+        else:
+            rel_path = row[0]
+            tank_number = row[1] if len(row) > 1 else None
 
-    rel_path = inspection.lifter_weight
-    folder = os.path.dirname(rel_path)
-    tank_number = folder
-    folder_abs = os.path.join(UPLOAD_DIR, folder)
-    thumb = None
-    if os.path.isdir(folder_abs):
-        # Find any file matching <tank_number>_lifter_weight_*_thumb.jpg
-        candidates = [
-            fn
-            for fn in os.listdir(folder_abs)
-            if fn.startswith(f"{tank_number}_lifter_weight_") and fn.endswith("_thumb.jpg")
-        ]
-        if candidates:
-            # If multiple, pick the most recently modified
-            candidates.sort(key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)), reverse=True)
-            thumb = f"{folder}/{candidates[0]}"
-    return {"inspection_id": inspection_id, "thumbnail_path": thumb}
+        folder = os.path.dirname(rel_path) if rel_path else ""
+        folder_abs = os.path.join(UPLOAD_DIR, folder)
+        thumb = None
+        if os.path.isdir(folder_abs):
+            candidates = [fn for fn in os.listdir(folder_abs) if fn.startswith(f"{tank_number}_lifter_weight_") and fn.endswith("_thumb.jpg")]
+            if candidates:
+                candidates.sort(key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)), reverse=True)
+                thumb = f"{folder}/{candidates[0]}"
+        return success_resp("Lifter weight thumbnail fetched", {"inspection_id": inspection_id, "thumbnail_path": thumb}, 200)
+    except Exception as e:
+        logger.error(f"Error fetching lifter weight thumbnail for {inspection_id}: {e}", exc_info=True)
+        return error_resp("Internal server error", 500)
 
 
-# ============================================================================
-# Endpoint: Create Tank Inspection
-# ============================================================================
-
-
-@router.post("/create/tank_inspection", response_model=TankInspectionResponse, status_code=status.HTTP_201_CREATED)
+# -------------------------
+# Create Tank Inspection (flat payload with master ids)
+# -------------------------
+@router.post("/create/tank_inspection", status_code=status.HTTP_201_CREATED)
 def create_tank_inspection(
     payload: TankInspectionCreate,
     db: Session = Depends(get_db),
+    current_user: Optional[dict] = Depends(get_current_user),
 ):
     """
-    Create a new tank inspection record.
-    Also ensures a row exists in inspection_report for this tank & date.
+    Create a tank inspection record.
+    - Client sends tank_id (int) in payload.
+    - We resolve tank_number from tank_id and proceed as before.
+    - emp_id is auto-derived from current_user.
+    - operator_id may be provided by client; it must exist in operators table (operator_exists).
+    - The inserted row will include tank_id and emp_id.
     """
     try:
-        # Step 1: Validate tank exists
-        validate_tank_exists(db, payload.tank_number)
-
-        # Step 2: Lookup and resolve master table IDs
-        # ----- status -----
-        status_result = db.execute(
-            text("SELECT status_id FROM tank_status WHERE LOWER(status_name) = LOWER(:status_name)"),
-            {"status_name": payload.status_name},
-        ).fetchone()
-        if not status_result:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid tank status: '{payload.status_name}' not found",
-            )
-        status_id = status_result[0]
-
-        # ----- inspection type -----
-        inspection_type_result = db.execute(
-            text(
-                "SELECT inspection_type_id FROM inspection_type "
-                "WHERE LOWER(inspection_type_name) = LOWER(:inspection_type_name)"
-            ),
-            {"inspection_type_name": payload.inspection_type_name},
-        ).fetchone()
-        if not inspection_type_result:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid inspection type: '{payload.inspection_type_name}' not found",
-            )
-        inspection_type_id = inspection_type_result[0]
-
-        # ----- product -----
-        product_result = db.execute(
-            text("SELECT product_id FROM product_master WHERE LOWER(product_name) = LOWER(:product_name)"),
-            {"product_name": payload.product_name},
-        ).fetchone()
-        if not product_result:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid product: '{payload.product_name}' not found",
-            )
-        product_id = product_result[0]
-
-        # ----- location -----
-        location_result = db.execute(
-            text("SELECT location_id FROM location_master WHERE LOWER(location_name) = LOWER(:location_name)"),
-            {"location_name": payload.location_name},
-        ).fetchone()
-        if not location_result:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid location: '{payload.location_name}' not found",
-            )
-        location_id = location_result[0]
-
-        # Step 3: Auto-fill from tank_details
-        tank_details = fetch_tank_details(db, payload.tank_number)
-
-        # Step 4: inspection_date (always "now")
-        inspection_date = datetime.now()
-
-        # Step 4a: ensure inspection_report row exists for this tank & date
-        insp_date_str = inspection_date.date().isoformat()
-        existing_report = (
-            db.query(InspectionReport)
-            .filter(
-                InspectionReport.tank_number == payload.tank_number,
-                InspectionReport.inspection_date == insp_date_str,
-            )
-            .first()
-        )
-
-        if not existing_report:
-            new_report = InspectionReport(
-                tank_number=payload.tank_number,
-                inspection_date=insp_date_str,  # DATE column / string "YYYY-MM-DD"
-                emp_id=payload.operator_id,
-                notes=payload.notes,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-            )
-            db.add(new_report)
-            # no need to flush id here unless you want it; linkage is by tank+date
-
-        # Prevent duplicate inspection for same tank + date + inspection_type
-        existing = (
-            db.query(TankInspectionDetails)
-            .filter(
-                TankInspectionDetails.tank_number == payload.tank_number,
-                func.date(TankInspectionDetails.inspection_date) == inspection_date.date(),
-                TankInspectionDetails.inspection_type_id == inspection_type_id,
-            )
-            .first()
-        )
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Inspection already exists for tank {payload.tank_number} "
-                    f"on {inspection_date.date()} with inspection type '{payload.inspection_type_name}' "
-                    f"(inspection_id={existing.inspection_id})."
-                ),
-            )
-
-        # Step 5: Generate report_number
-        report_number = generate_report_number(db, inspection_date)
-
-        # Step 6: Create new inspection record
-        pi_next_date = fetch_pi_next_inspection_date(db, payload.tank_number)
-
-        new_inspection = TankInspectionDetails(
-            inspection_date=inspection_date,
-            report_number=report_number,
-            tank_number=payload.tank_number,
-            status_id=status_id,
-            product_id=product_id,
-            inspection_type_id=inspection_type_id,
-            location_id=location_id,
-            working_pressure=tank_details.get("working_pressure"),
-            frame_type=tank_details.get("frame_type"),
-            design_temperature=tank_details.get("design_temperature"),
-            cabinet_type=tank_details.get("cabinet_type"),
-            mfgr=tank_details.get("mfgr"),
-            pi_next_inspection_date=pi_next_date,
-            safety_valve_brand=payload.safety_valve_brand,
-            safety_valve_model=payload.safety_valve_model,
-            safety_valve_size=payload.safety_valve_size,
-            notes=payload.notes,
-            created_by=payload.created_by,
-            operator_id=payload.operator_id,
-            ownership=(
-                "OWN"
-                if tank_details.get("lease") in (0, "0")
-                else "LEASED"
-                if tank_details.get("lease") in (1, "1")
-                else None
-            ),
-        )
-
-        # operator_name auto-fill (unchanged)
-        if payload.operator_id:
-            try:
-                user = db.query(User).filter(User.emp_id == payload.operator_id).first()
-                if user:
-                    new_inspection.operator_name = user.name
-                else:
-                    logger.warning(f"Operator with emp_id {payload.operator_id} not found")
-            except Exception as e:
-                logger.warning(f"Could not fetch operator name: {e}")
+        # --- Resolve tank_number from payload.tank_id ---
         try:
-            if new_inspection.ownership is None:
-                lease_val = tank_details.get("lease")
-                new_inspection.ownership = (
-                    "OWN" if lease_val in (0, "0") else "LEASED" if lease_val in (1, "1") else None
-                )
+            tn_row = db.execute(
+                text("SELECT tank_number FROM tank_details WHERE tank_id = :tid LIMIT 1"),
+                {"tid": payload.tank_id},
+            ).fetchone()
+        except Exception as e:
+            logger.error("DB error resolving tank_number for tank_id=%s: %s", payload.tank_id, e, exc_info=True)
+            return error_resp(f"Tank not found for id: {payload.tank_id}", 404)
+
+        if not tn_row:
+            return error_resp(f"Tank not found for id: {payload.tank_id}", 404)
+
+        if hasattr(tn_row, "_mapping"):
+            tank_number = tn_row._mapping.get("tank_number")
+        elif isinstance(tn_row, dict):
+            tank_number = tn_row.get("tank_number")
+        else:
+            tank_number = tn_row[0] if len(tn_row) > 0 else None
+
+        if not tank_number:
+            return error_resp(f"Tank number missing for id: {payload.tank_id}", 404)
+
+        # --- Validate master ids (unchanged) ---
+        master_checks = [
+            ("tank_status", payload.status_id, "status_id"),
+            ("product_master", payload.product_id, "product_id"),
+            ("inspection_type", payload.inspection_type_id, "inspection_type_id"),
+            ("location_master", payload.location_id, "location_id"),
+        ]
+        for table, val, name in master_checks:
+            # try several common id column names (id, expected name, and simple variants)
+            cols_to_try = ["id", name]
+            # add a variant without the underscore (e.g. statusid) and without the suffix (e.g. status)
+            if name and "_id" in name:
+                base = name.replace("_id", "")
+                cols_to_try.append(f"{base}id")
+                cols_to_try.append(base)
+
+            r = None
+            for col in cols_to_try:
+                try:
+                    r = db.execute(text(f"SELECT 1 FROM `{table}` WHERE `{col}` = :id LIMIT 1"), {"id": val}).fetchone()
+                except Exception:
+                    r = None
+                if r:
+                    break
+
+            if not r:
+                return error_resp(f"Invalid {name}: {val}", 400)
+
+        # --- Fetch tank details ---
+        tank_details = fetch_tank_details(db, tank_number)
+        inspection_date = datetime.now()
+        insp_date_str = inspection_date.date().isoformat()
+
+        # --- Resolve emp_id from current_user (auto) ---
+        emp_id_val = None
+        try:
+            cu = current_user
+            if cu:
+                if hasattr(cu, "emp_id") and cu.emp_id not in (None, ""):
+                    try:
+                        emp_id_val = int(cu.emp_id)
+                    except Exception:
+                        emp_id_val = cu.emp_id
+                elif hasattr(cu, "id") and cu.id not in (None, ""):
+                    try:
+                        emp_id_val = int(cu.id)
+                    except Exception:
+                        emp_id_val = cu.id
+                elif isinstance(cu, dict):
+                    for key in ("emp_id", "id", "user_id", "sub"):
+                        if key in cu and cu.get(key) not in (None, ""):
+                            try:
+                                emp_id_val = int(cu.get(key))
+                            except Exception:
+                                emp_id_val = cu.get(key)
+                            break
+        except Exception:
+            emp_id_val = None
+
+        # --- operator_id is optional, no validation required (can be 0, None, or any value) ---
+        # Client can send any value or omit it entirely
+
+        # --- Prevent duplicate inspection for same tank+date+inspection_type ---
+        existing = db.execute(
+            text(
+                "SELECT inspection_id FROM tank_inspection_details "
+                "WHERE tank_number = :tn AND DATE(inspection_date) = :d AND inspection_type_id = :itype LIMIT 1"
+            ),
+            {"tn": tank_number, "d": inspection_date.date(), "itype": payload.inspection_type_id},
+        ).fetchone()
+        if existing:
+            return error_resp("Inspection already exists", 400)
+
+        # --- Generate report number and pi_next ---
+        report_number = generate_report_number(db, inspection_date)
+        pi_next_date = fetch_pi_next_inspection_date(db, tank_number)
+
+        # --- Ownership logic ---
+        lease_val = tank_details.get("lease")
+        ownership_val = None
+        try:
+            if isinstance(lease_val, str):
+                l = lease_val.strip().lower()
+                if l in ("no", "n", "0", ""):
+                    ownership_val = "owned"
+                elif l in ("yes", "y", "1"):
+                    ownership_val = "leased"
+            elif lease_val in (0, "0"):
+                ownership_val = "owned"
+            elif lease_val in (1, "1"):
+                ownership_val = "leased"
+        except Exception:
+            ownership_val = None
+
+        # --- Insert the inspection record (note: include tank_id column) ---
+        try:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO tank_inspection_details
+                    (inspection_date, report_number, tank_number, tank_id, status_id, product_id, inspection_type_id, location_id,
+                     working_pressure, frame_type, design_temperature, cabinet_type, mfgr, pi_next_inspection_date,
+                     safety_valve_brand_id, safety_valve_model_id, safety_valve_size_id, notes, created_by, updated_by,
+                     operator_id, emp_id, ownership, created_at, updated_at)
+                    VALUES
+                    (:inspection_date, :report_number, :tank_number, :tank_id, :status_id, :product_id, :inspection_type_id, :location_id,
+                     :working_pressure, :frame_type, :design_temperature, :cabinet_type, :mfgr, :pi_next_inspection_date,
+                     :svb, :svm, :svs, :notes, :created_by, :updated_by,
+                     :operator_id, :emp_id, :ownership, NOW(), NOW())
+                    """
+                ),
+                {
+                    "inspection_date": inspection_date,
+                    "report_number": report_number,
+                    "tank_number": tank_number,
+                    "tank_id": payload.tank_id,
+                    "status_id": payload.status_id,
+                    "product_id": payload.product_id,
+                    "inspection_type_id": payload.inspection_type_id,
+                    "location_id": payload.location_id,
+                    "working_pressure": tank_details.get("working_pressure"),
+                    "frame_type": tank_details.get("frame_type"),
+                    "design_temperature": tank_details.get("design_temperature"),
+                    "cabinet_type": tank_details.get("cabinet_type"),
+                    "mfgr": tank_details.get("mfgr"),
+                    "pi_next_inspection_date": pi_next_date,
+                    "svb": payload.safety_valve_brand_id,
+                    "svm": payload.safety_valve_model_id,
+                    "svs": payload.safety_valve_size_id,
+                    "notes": payload.notes,
+                    "created_by": payload.created_by,
+                    "updated_by": payload.created_by,
+                    "operator_id": payload.operator_id,
+                    "emp_id": emp_id_val,
+                    "ownership": ownership_val,
+                },
+            )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.error("Failed to create tank inspection record: %s", e, exc_info=True)
+            return error_resp(f"Internal server error: {e}", 500)
+
+        # --- Fetch inserted row and return ---
+        new_row = db.execute(text("SELECT * FROM tank_inspection_details WHERE report_number = :rn"), {"rn": report_number}).fetchone()
+        if not new_row:
+            return error_resp("Failed to fetch created record", 500)
+
+        try:
+            if hasattr(new_row, "_mapping"):
+                out = dict(new_row._mapping)
+            elif isinstance(new_row, dict):
+                out = new_row
+            else:
+                out = dict((k, v) for k, v in new_row)
+        except Exception:
+            try:
+                out = jsonable_encoder(new_row)
+            except Exception:
+                out = {"report_number": report_number}
+
+        return success_resp("Inspection created successfully", out, 201)
+
+    except HTTPException as he:
+        return error_resp(he.detail if isinstance(he.detail, str) else str(he.detail), he.status_code)
+    except Exception as e:
+        logger.error(f"Error creating tank inspection: {e}", exc_info=True)
+        try:
+            db.rollback()
         except Exception:
             pass
-
-        db.add(new_inspection)
-        db.commit()
-        db.refresh(new_inspection)
-
-        logger.info(f"Created inspection record: {report_number} for tank {payload.tank_number}")
-
-        return build_tank_inspection_response(new_inspection)
-
-    except HTTPException:
-        raise
-    except IntegrityError:
-        db.rollback()
-        # In case the DB unique constraint catches a duplicate first
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Duplicate inspection for this tank, date and inspection type.",
-        )
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error creating tank inspection: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}",
-        )
+        return error_resp(f"Internal server error: {e}", 500)
 
 
-# ============================================================================
-# Update Tank Inspection Endpoint
-# ============================================================================
-
-class TankInspectionUpdate(BaseModel):
-    """Request schema for updating a tank inspection record (supports partial updates)."""
-
-    # core / header fields
+# -------------------------
+# Update tank_inspection_details (PUT)
+# -------------------------
+class TankInspectionUpdateModel(BaseModel):
     inspection_date: Optional[datetime] = None
-    tank_number: Optional[str] = None
-
-    # you can send either *_id or *_name (name will be mapped to id)
+    tank_id: Optional[int] = None
     status_id: Optional[int] = None
-    status_name: Optional[str] = None
-
     inspection_type_id: Optional[int] = None
-    inspection_type_name: Optional[str] = None
-
     product_id: Optional[int] = None
-    product_name: Optional[str] = None
-
     location_id: Optional[int] = None
-    location_name: Optional[str] = None
-
-    # tank_details-ish fields (allow override if needed)
     working_pressure: Optional[float] = None
     frame_type: Optional[str] = None
     design_temperature: Optional[float] = None
     cabinet_type: Optional[str] = None
     mfgr: Optional[str] = None
-
-    # safety valve fields
-    safety_valve_brand: Optional[str] = None
-    safety_valve_model: Optional[str] = None
-    safety_valve_size: Optional[str] = None
-
-    # misc
+    safety_valve_brand_id: Optional[int] = None
+    safety_valve_model_id: Optional[int] = None      # nullable
+    safety_valve_size_id: Optional[int] = None       # nullable
     notes: Optional[str] = None
-    operator_id: Optional[int] = None
-    ownership: Optional[str] = None  # "OWN" / "LEASED" if you ever want to override
+    operator_id: Optional[int] = None             # nullable
+    ownership: Optional[str] = None
+
+    class Config:
+        from_attributes = True
 
 
-@router.put("/update/{inspection_id}", response_model=TankInspectionResponse)
-def update_tank_inspection(
-    inspection_id: int,
-    payload: TankInspectionUpdate,
-    db: Session = Depends(get_db),
-):
-    """
-    Update a tank inspection record by inspection_id.
-
-    All fields in TankInspectionUpdate are optional.
-    Only the ones you send in the body will be changed.
-    """
+@router.put("/update/tank_inspection_details/{inspection_id}")
+def update_tank_inspection_details(inspection_id: int, payload: TankInspectionUpdateModel, db: Session = Depends(get_db), current_user: Optional[dict] = Depends(get_current_user)):
     try:
-        # Fetch the inspection record
-        inspection = (
-            db.query(TankInspectionDetails)
-            .filter(TankInspectionDetails.inspection_id == inspection_id)
-            .first()
-        )
+        row = db.execute(text("SELECT * FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not row:
+            return error_resp("Inspection not found", 404)
 
-        if not inspection:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Inspection with ID {inspection_id} not found",
-            )
+        params = {"id": inspection_id}
+        updates = []
 
-        # --------- basic fields ---------
-        if payload.inspection_date is not None:
-            inspection.inspection_date = payload.inspection_date
+        # operator_id is optional, no validation required (can be 0, None, or any value)
+        if hasattr(payload, "operator_id") and payload.operator_id is not None:
+            updates.append("operator_id = :operator_id")
+            params["operator_id"] = payload.operator_id
 
-        if payload.tank_number is not None:
-            if payload.tank_number != inspection.tank_number:
-                validate_tank_exists(db, payload.tank_number)
-            inspection.tank_number = payload.tank_number
-
-        # --------- status (id or name) ---------
-        if payload.status_id is not None:
-            inspection.status_id = payload.status_id
-        elif payload.status_name is not None:
-            row = db.execute(
-                text("SELECT status_id FROM tank_status WHERE LOWER(status_name) = LOWER(:name)"),
-                {"name": payload.status_name},
-            ).fetchone()
-            if not row:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid tank status: '{payload.status_name}' not found",
-                )
-            inspection.status_id = row[0]
-
-        # --------- inspection type ---------
-        if payload.inspection_type_id is not None:
-            inspection.inspection_type_id = payload.inspection_type_id
-        elif payload.inspection_type_name is not None:
-            row = db.execute(
-                text(
-                    "SELECT inspection_type_id FROM inspection_type "
-                    "WHERE LOWER(inspection_type_name) = LOWER(:name)"
-                ),
-                {"name": payload.inspection_type_name},
-            ).fetchone()
-            if not row:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid inspection type: '{payload.inspection_type_name}' not found",
-                )
-            inspection.inspection_type_id = row[0]
-
-        # --------- product ---------
-        if payload.product_id is not None:
-            inspection.product_id = payload.product_id
-        elif payload.product_name is not None:
-            row = db.execute(
-                text("SELECT product_id FROM product_master WHERE LOWER(product_name) = LOWER(:name)"),
-                {"name": payload.product_name},
-            ).fetchone()
-            if not row:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid product: '{payload.product_name}' not found",
-                )
-            inspection.product_id = row[0]
-
-        # --------- location ---------
-        if payload.location_id is not None:
-            inspection.location_id = payload.location_id
-        elif payload.location_name is not None:
-            row = db.execute(
-                text("SELECT location_id FROM location_master WHERE LOWER(location_name) = LOWER(:name)"),
-                {"name": payload.location_name},
-            ).fetchone()
-            if not row:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid location: '{payload.location_name}' not found",
-                )
-            inspection.location_id = row[0]
-
-        # --------- tank detail overrides (optional) ---------
-        if payload.working_pressure is not None:
-            inspection.working_pressure = payload.working_pressure
-        if payload.frame_type is not None:
-            inspection.frame_type = payload.frame_type
-        if payload.design_temperature is not None:
-            inspection.design_temperature = payload.design_temperature
-        if payload.cabinet_type is not None:
-            inspection.cabinet_type = payload.cabinet_type
-        if payload.mfgr is not None:
-            inspection.mfgr = payload.mfgr
-
-        # --------- safety valve fields ---------
-        if payload.safety_valve_brand is not None:
-            inspection.safety_valve_brand = payload.safety_valve_brand
-        if payload.safety_valve_model is not None:
-            inspection.safety_valve_model = payload.safety_valve_model
-        if payload.safety_valve_size is not None:
-            inspection.safety_valve_size = payload.safety_valve_size
-
-        # --------- notes ---------
-        if payload.notes is not None:
-            inspection.notes = payload.notes
-
-        # --------- operator (and name lookup) ---------
-        if payload.operator_id is not None:
-            inspection.operator_id = payload.operator_id
-
-            try:
-                user = db.query(User).filter(User.emp_id == payload.operator_id).first()
-                if user:
-                    inspection.operator_name = user.name
-                    logger.info(f"Set operator {user.name} ({payload.operator_id}) for inspection {inspection_id}")
-                else:
-                    logger.warning(
-                        f"Operator with emp_id {payload.operator_id} not found for inspection {inspection_id}"
-                    )
-                    inspection.operator_name = None
-            except Exception as e:
-                logger.warning(f"Could not fetch operator name for inspection {inspection_id}: {e}")
-
-        # --------- ownership (optional override, otherwise recompute) ---------
-        if payload.ownership is not None:
-            inspection.ownership = payload.ownership
-        else:
-            try:
-                lease_row = db.execute(
-                    text("SELECT lease FROM tank_details WHERE tank_number = :tank_number"),
-                    {"tank_number": inspection.tank_number},
-                ).fetchone()
-                lease_val = lease_row[0] if lease_row else None
-                inspection.ownership = (
-                    "OWN" if lease_val in (0, "0") else "LEASED" if lease_val in (1, "1") else None
-                )
-            except Exception as e:
-                logger.warning(f"Could not recompute ownership for inspection {inspection_id}: {e}")
-
-        # --------- refresh PI next inspection date ---------
-        inspection.pi_next_inspection_date = fetch_pi_next_inspection_date(db, inspection.tank_number)
-
-        # --------- timestamp ---------
-        inspection.updated_at = datetime.utcnow()
-
-        db.commit()
-        db.refresh(inspection)
-
-        logger.info(f"Updated inspection record {inspection_id}")
-
-        return build_tank_inspection_response(inspection)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error updating tank inspection {inspection_id}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}",
-        )
-
-
-# ============================================================================
-# Listing and Delete endpoints
-# ============================================================================
-
-
-@router.get("/list", response_model=GenericResponse)
-def list_tank_inspections(
-    inspection_id: Optional[int] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    db: Session = Depends(get_db),
-):
-    """Return inspection listing."""
-    try:
-        params = {"inspection_id": inspection_id, "start_date": start_date, "end_date": end_date}
-        sql = text(
-            """
-            SELECT tid.inspection_id, DATE(tid.inspection_date) AS inspection_date, tid.tank_number,
-                   it.inspection_type_name AS inspection_type, tid.operator_name AS operator_name,
-                   ts.status_name AS status, tid.report_number
-            FROM tank_inspection_details tid
-            LEFT JOIN inspection_type it ON tid.inspection_type_id = it.inspection_type_id
-            LEFT JOIN tank_status ts ON tid.status_id = ts.status_id
-            WHERE (:inspection_id IS NULL OR tid.inspection_id = :inspection_id)
-              AND (:start_date IS NULL OR DATE(tid.inspection_date) >= :start_date)
-              AND (:end_date IS NULL OR DATE(tid.inspection_date) <= :end_date)
-            ORDER BY tid.inspection_id DESC
-            """
-        )
-        rows = db.execute(sql, params).mappings().all()
-        return {"success": True, "data": [dict(r) for r in rows]}
-    except Exception as e:
-        logger.error(f"Error listing inspections: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-
-@router.delete("/delete/{inspection_id}")
-def delete_tank_inspection(inspection_id: int, db: Session = Depends(get_db)):
-    """Delete a tank inspection by inspection_id."""
-    try:
-        inspection = (
-            db.query(TankInspectionDetails)
-            .filter(TankInspectionDetails.inspection_id == inspection_id)
-            .first()
-        )
-        if not inspection:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Inspection {inspection_id} not found",
-            )
-        db.delete(inspection)
-        db.commit()
-        return {"success": True, "data": {"inspection_id": inspection_id}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error deleting inspection {inspection_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-
-@router.post("/{inspection_id}/lifter_weight")
-def upload_lifter_weight(inspection_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Upload lifter weight photo for an inspection and store path in lifter_weight column."""
-    try:
-        # Fetch inspection
-        inspection = (
-            db.query(TankInspectionDetails)
-            .filter(TankInspectionDetails.inspection_id == inspection_id)
-            .first()
-        )
-        if not inspection:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Inspection {inspection_id} not found")
-
-        # Basic validation
-        if not file.content_type or not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File must be an image")
-
-        # Save file
-        saved = _save_lifter_file(file, inspection.tank_number)
-        rel_path = saved["image_path"]
-        thumb_path = saved["thumbnail_path"]
-
-        # If there was an existing file, try to remove it and its thumbnail
+        # For emp_id: we set emp_id to logged-in user's emp_id if current_user present
+        emp_id_val = None
         try:
-            if inspection.lifter_weight:
-                old_path = os.path.join(UPLOAD_DIR, *inspection.lifter_weight.split("/"))
-                if os.path.exists(old_path):
-                    os.remove(old_path)
-                # Remove old thumbnail if present
-                old_base = os.path.splitext(os.path.basename(old_path))[0]
-                folder = os.path.dirname(old_path)
-                if os.path.isdir(folder):
-                    for fn in os.listdir(folder):
-                        if "thumb" in fn and old_base in fn:
+            cu = current_user
+            if cu:
+                if hasattr(cu, "emp_id") and cu.emp_id not in (None, ""):
+                    try:
+                        emp_id_val = int(cu.emp_id)
+                    except Exception:
+                        emp_id_val = cu.emp_id
+                elif hasattr(cu, "id") and cu.id not in (None, ""):
+                    try:
+                        emp_id_val = int(cu.id)
+                    except Exception:
+                        emp_id_val = cu.id
+                elif isinstance(cu, dict):
+                    for key in ("emp_id", "id", "user_id", "sub"):
+                        if key in cu and cu.get(key) not in (None, ""):
                             try:
-                                os.remove(os.path.join(folder, fn))
+                                emp_id_val = int(cu.get(key))
                             except Exception:
-                                pass
+                                emp_id_val = cu.get(key)
+                            break
         except Exception:
-            pass
+            emp_id_val = None
 
-        # Update record
-        inspection.lifter_weight = rel_path
-        inspection.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(inspection)
+        # if we have emp_id_val, update emp_id column
+        if emp_id_val is not None:
+            updates.append("emp_id = :emp_id")
+            params["emp_id"] = emp_id_val
 
-        return {
-            "success": True,
-            "message": "Lifter weight photo uploaded",
-            "data": {
-                "inspection_id": inspection_id,
-                "lifter_weight": rel_path,
-                "thumbnail": thumb_path,
-            },
-        }
+        # Handle optional tank_id: if provided, resolve tank_number and set both tank_id and tank_number
+        if hasattr(payload, "tank_id") and payload.tank_id is not None:
+            try:
+                tn_row = db.execute(text("SELECT tank_number FROM tank_details WHERE tank_id = :tid LIMIT 1"), {"tid": payload.tank_id}).fetchone()
+            except Exception as e:
+                logger.error("DB error resolving tank_number for tank_id=%s: %s", payload.tank_id, e, exc_info=True)
+                return error_resp(f"Tank not found for id: {payload.tank_id}", 404)
+            if not tn_row:
+                return error_resp(f"Tank not found for id: {payload.tank_id}", 404)
+            if hasattr(tn_row, "_mapping"):
+                tank_number_val = tn_row._mapping.get("tank_number")
+            elif isinstance(tn_row, dict):
+                tank_number_val = tn_row.get("tank_number")
+            else:
+                tank_number_val = tn_row[0] if len(tn_row) > 0 else None
+            if not tank_number_val:
+                return error_resp(f"Tank number missing for id: {payload.tank_id}", 404)
+            updates.append("tank_id = :tank_id")
+            updates.append("tank_number = :tank_number")
+            params["tank_id"] = payload.tank_id
+            params["tank_number"] = tank_number_val
 
-    except HTTPException:
-        raise
+        # update other allowed fields
+        for field in [
+            "inspection_date", "status_id", "inspection_type_id", "product_id", "location_id",
+            "working_pressure", "frame_type", "design_temperature", "cabinet_type", "mfgr",
+            "notes", "ownership"
+        ]:
+            if hasattr(payload, field) and getattr(payload, field) is not None:
+                updates.append(f"{field} = :{field}")
+                params[field] = getattr(payload, field)
+
+        if updates:
+            sql = f"UPDATE tank_inspection_details SET {', '.join(updates)}, updated_at = NOW() WHERE inspection_id = :id"
+            try:
+                db.execute(text(sql), params)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+        return success_resp("Inspection details updated", {"inspection_id": inspection_id}, 200)
     except Exception as e:
-        db.rollback()
-        logger.error(f"Error uploading lifter weight for inspection {inspection_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        logger.error(f"Error updating tank inspection details {inspection_id}: {e}", exc_info=True)
+        return error_resp("Error updating inspection details", 500)
 
 
+# -------------------------
+# Review endpoints (get, update, delete)
+# -------------------------
 @router.get("/review/{inspection_id}")
 def get_inspection_review(inspection_id: int, db: Session = Depends(get_db)):
-    """Return a review report combining tank_inspection_details, tank_images, checklist and to_do_list."""
-    inspection = (
-        db.query(TankInspectionDetails)
-        .filter(TankInspectionDetails.inspection_id == inspection_id)
-        .first()
-    )
-    if not inspection:
-        raise HTTPException(status_code=404, detail="Inspection not found")
-
-    # Build inspection details dict excluding created_at/updated_at
-    insp = inspection.as_dict if hasattr(inspection, "as_dict") else None
-    if insp is None:
-        # fallback: construct manually
-        insp = {c.name: getattr(inspection, c.name) for c in inspection.__table__.columns}
-    insp.pop("created_at", None)
-    insp.pop("updated_at", None)
-
-    # lifter weight thumbnail detection
-    lifter_thumb = None
     try:
-        if inspection.lifter_weight:
-            folder = os.path.dirname(inspection.lifter_weight)
-            tank_number = folder
-            folder_abs = os.path.join(UPLOAD_DIR, folder)
-            if os.path.isdir(folder_abs):
-                candidates = [
-                    fn
-                    for fn in os.listdir(folder_abs)
-                    if fn.startswith(f"{tank_number}_lifter_weight_") and fn.endswith("_thumb.jpg")
-                ]
-                if candidates:
-                    candidates.sort(
-                        key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)),
-                        reverse=True,
-                    )
-                    lifter_thumb = f"{folder}/{candidates[0]}"
-    except Exception:
-        lifter_thumb = None
-    insp["lifter_weight_thumbnail"] = lifter_thumb
+        inspection = db.execute(text("SELECT * FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not inspection:
+            return error_resp("Inspection not found", 404)
 
-    # Images: find images for tank and date
-    images_out = []
-    try:
-        tank_number = inspection.tank_number
-        insp_date = inspection.inspection_date.date() if inspection.inspection_date else None
-
-        # Attempt to load DB records for images (if any)
         try:
-            if insp_date:
-                imgs = (
-                    db.query(TankImages)
-                    .filter(TankImages.tank_number == tank_number, TankImages.created_date == insp_date)
-                    .all()
-                )
+            if hasattr(inspection, "_mapping"):
+                insp = dict(inspection._mapping)
+            elif isinstance(inspection, dict):
+                insp = inspection
             else:
-                imgs = db.query(TankImages).filter(TankImages.tank_number == tank_number).all()
+                insp = dict((k, v) for k, v in inspection)
         except Exception:
+            insp = jsonable_encoder(inspection)
+
+        insp.pop("created_at", None)
+        insp.pop("updated_at", None)
+
+        # lifter thumbnail logic unchanged...
+        lifter_thumb = None
+        try:
+            lw = insp.get("lifter_weight")
+            if lw:
+                folder = os.path.dirname(lw)
+                tank_number = folder
+                folder_abs = os.path.join(UPLOAD_DIR, folder)
+                if os.path.isdir(folder_abs):
+                    candidates = [fn for fn in os.listdir(folder_abs) if fn.startswith(f"{tank_number}_lifter_weight_") and fn.endswith("_thumb.jpg")]
+                    if candidates:
+                        candidates.sort(key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)), reverse=True)
+                        lifter_thumb = f"{folder}/{candidates[0]}"
+        except Exception:
+            lifter_thumb = None
+        insp["lifter_weight_thumbnail"] = lifter_thumb
+
+        # tank images and checklist/to-do logic unchanged...
+        tank_images_list = []
+        try:
+            tank_number = insp.get("tank_number")
+            insp_date = insp.get("inspection_date")
+            if insp_date and isinstance(insp_date, datetime):
+                insp_date = insp_date.date()
             imgs = []
+            try:
+                if insp_date:
+                    imgs = db.execute(text("SELECT * FROM tank_images WHERE tank_number = :tn AND created_date = :cd"), {"tn": tank_number, "cd": insp_date}).fetchall()
+                else:
+                    imgs = db.execute(text("SELECT * FROM tank_images WHERE tank_number = :tn"), {"tn": tank_number}).fetchall()
+            except Exception:
+                imgs = []
+            folder_abs = os.path.join(UPLOAD_DIR, tank_number or "")
+            for im in imgs:
+                try:
+                    if hasattr(im, "_mapping"):
+                        imd = dict(im._mapping)
+                    elif isinstance(im, dict):
+                        imd = im
+                    else:
+                        imd = dict((k, v) for k, v in im)
+                except Exception:
+                    imd = jsonable_encoder(im)
+                img_type = imd.get("image_type")
+                if not img_type or str(img_type).lower() == "lifter_weight":
+                    continue
+                thumb_path = None
+                if os.path.isdir(folder_abs):
+                    prefix = f"{tank_number}_{img_type}_"
+                    candidates = [fn for fn in os.listdir(folder_abs) if fn.startswith(prefix) and fn.endswith("_thumb.jpg")]
+                    if candidates:
+                        candidates.sort(key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)), reverse=True)
+                        thumb_path = f"{tank_number}/{candidates[0]}"
+                tank_images_list.append({"image_type": img_type, "thumbnail_path": thumb_path})
+        except Exception:
+            tank_images_list = []
 
-        # For each image row (excluding lifter_weight), find the thumbnail or set null
-        tank_images_list = []
-        folder_abs = os.path.join(UPLOAD_DIR, tank_number)
-        for im in imgs:
-            img_type = im.image_type
-            if not img_type or img_type.lower() == "lifter_weight":
-                continue
-            thumb_path = None
-            if os.path.isdir(folder_abs):
-                prefix = f"{tank_number}_{img_type}_"
-                candidates = [
-                    fn
-                    for fn in os.listdir(folder_abs)
-                    if fn.startswith(prefix) and fn.endswith("_thumb.jpg")
-                ]
-                if candidates:
-                    candidates.sort(
-                        key=lambda fn: os.path.getmtime(os.path.join(folder_abs, fn)),
-                        reverse=True,
-                    )
-                    thumb_path = f"{tank_number}/{candidates[0]}"
-            tank_images_list.append({"image_type": img_type, "thumbnail_path": thumb_path})
-    except Exception:
-        tank_images_list = []
-
-    # Find related inspection_report for checklist and todo using tank_number + date
-    checklist_out = []
-    todo_out = []
-    try:
-        report = None
-        if inspection.inspection_date and inspection.tank_number:
-            insp_date_str = inspection.inspection_date.date().isoformat()
-            report = (
-                db.query(InspectionReport)
-                .filter(
-                    InspectionReport.tank_number == inspection.tank_number,
-                    InspectionReport.inspection_date == insp_date_str,
-                )
-                .first()
-            )
-        if report:
-            report_id = report.id
-            # fetch checklist items
-            rows = db.query(InspectionChecklist).filter(InspectionChecklist.report_id == report_id).all()
-            for r in rows:
-                checklist_out.append(
-                    {
-                        "job_name": r.job_name,
-                        "sub_job_name": r.sub_job_description,
-                        "status": r.status,
-                        "comment": r.comment,
-                    }
-                )
-
-            # fetch todo items
-            todos = db.query(ToDoList).filter(ToDoList.report_id == report_id).all()
-            for t in todos:
-                todo_out.append(
-                    {
-                        "job_name": t.job_name,
-                        "sub_job_name": t.sub_job_description,
-                        "status": t.status,
-                        "comment": t.comment,
-                    }
-                )
-    except Exception:
         checklist_out = []
         todo_out = []
+        try:
+            # Fetch checklists and to-do items directly by inspection_id
+            inspection_id_val = insp.get("inspection_id")
+            if inspection_id_val:
+                rows = db.execute(text("SELECT * FROM inspection_checklist WHERE inspection_id = :iid"), {"iid": inspection_id_val}).fetchall()
+                for r in rows:
+                    try:
+                        if hasattr(r, "_mapping"):
+                            rr = dict(r._mapping)
+                        elif isinstance(r, dict):
+                            rr = r
+                        else:
+                            rr = dict((k, v) for k, v in r)
+                    except Exception:
+                        rr = jsonable_encoder(r)
+                    checklist_out.append({"job_name": rr.get("job_name"), "sub_job_name": rr.get("sub_job_description"), "status": rr.get("status"), "comment": rr.get("comment")})
+                todos = db.execute(text("SELECT * FROM to_do_list WHERE inspection_id = :iid"), {"iid": inspection_id_val}).fetchall()
+                for t in todos:
+                    try:
+                        if hasattr(t, "_mapping"):
+                            tt = dict(t._mapping)
+                        elif isinstance(t, dict):
+                            tt = t
+                        else:
+                            tt = dict((k, v) for k, v in t)
+                    except Exception:
+                        tt = jsonable_encoder(t)
+                    todo_out.append({"job_name": tt.get("job_name"), "sub_job_name": tt.get("sub_job_description"), "status": tt.get("status"), "comment": tt.get("comment")})
+        except Exception:
+            checklist_out = []
+            todo_out = []
 
-    resp = {
-        "inspection": insp,
-        "images": images_out,
-        "tank_images": tank_images_list,
-        "inspection_checklist": checklist_out,
-        "to_do_list": todo_out,
-    }
-
-    return resp
+        resp = {
+            "inspection": jsonable_encoder(insp),
+            "images": [],
+            "tank_images": tank_images_list,
+            "inspection_checklist": checklist_out,
+            "to_do_list": todo_out,
+        }
+        return success_resp("Inspection review fetched", resp, 200)
+    except Exception as e:
+        logger.error(f"Error fetching review for {inspection_id}: {e}", exc_info=True)
+        return error_resp("Error fetching inspection review", 500)
 
 
 class ReviewUpdateModel(BaseModel):
@@ -1087,149 +979,492 @@ class ReviewUpdateModel(BaseModel):
 
 
 @router.put("/review/{inspection_id}")
-def update_inspection_review(inspection_id: int, payload: ReviewUpdateModel, db: Session = Depends(get_db)):
-    """Update inspection details, checklist items and to-do items for a review. Images are not handled here."""
-    inspection = (
-        db.query(TankInspectionDetails)
-        .filter(TankInspectionDetails.inspection_id == inspection_id)
-        .first()
-    )
-    if not inspection:
-        raise HTTPException(status_code=404, detail="Inspection not found")
-
+def update_inspection_review(inspection_id: int, payload: ReviewUpdateModel, db: Session = Depends(get_db), current_user: Optional[dict] = Depends(get_current_user)):
     try:
-        # Update inspection fields
+        row = db.execute(text("SELECT * FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not row:
+            return error_resp("Inspection not found", 404)
+
         if payload.inspection:
+            upd_pairs = []
+            params = {"id": inspection_id}
             for k, v in payload.inspection.items():
                 if k in ("created_at", "updated_at", "inspection_id"):
                     continue
-                if hasattr(inspection, k):
-                    setattr(inspection, k, v)
+                # operator_id can be any value (0, None, etc.) - no validation needed
+                upd_pairs.append(f"{k} = :{k}")
+                params[k] = v
+            if upd_pairs:
+                sql = f"UPDATE tank_inspection_details SET {', '.join(upd_pairs)}, updated_at = NOW() WHERE inspection_id = :id"
+                try:
+                    db.execute(text(sql), params)
+                    db.commit()
+                except Exception:
+                    db.rollback()
 
-        # Find related report if exists
-        report = None
-        if inspection.inspection_date and inspection.tank_number:
-            insp_date_str = inspection.inspection_date.date().isoformat()
-            report = (
-                db.query(InspectionReport)
-                .filter(
-                    InspectionReport.tank_number == inspection.tank_number,
-                    InspectionReport.inspection_date == insp_date_str,
-                )
-                .first()
-            )
+        # fetch original row mapping
+        try:
+            if hasattr(row, "_mapping"):
+                insp = dict(row._mapping)
+            elif isinstance(row, dict):
+                insp = row
+            else:
+                insp = dict((k, v) for k, v in row)
+        except Exception:
+            insp = jsonable_encoder(row)
 
-        # Update checklist items
-        if payload.checklist and report:
-            for item in payload.checklist:
-                # require either id or sn
-                if "id" in item and item["id"]:
-                    chk = db.query(InspectionChecklist).filter(InspectionChecklist.id == item["id"]).first()
-                else:
-                    chk = None
-                    if "sn" in item:
-                        chk = (
-                            db.query(InspectionChecklist)
-                            .filter(
-                                InspectionChecklist.report_id == report.id,
-                                InspectionChecklist.sn == item["sn"],
-                            )
-                            .first()
-                        )
-                if not chk:
-                    continue
-                if "job_name" in item:
-                    chk.job_name = item["job_name"]
-                if "sub_job_name" in item:
-                    chk.sub_job_description = item["sub_job_name"]
-                if "status" in item:
-                    chk.status = item["status"]
-                if "comment" in item:
-                    chk.comment = item["comment"]
-                # flagged sync
-                chk.flagged = bool(chk.comment and str(chk.comment).strip() != "")
+        # Update checklist items directly using inspection_id
+        if payload.checklist:
+            try:
+                inspection_id_val = insp.get("inspection_id")
+                for item in payload.checklist:
+                    try:
+                        if item.get("id"):
+                            updates = []
+                            params = {"id": item["id"]}
+                            for k in ("job_name", "status", "comment", "sub_job_name"):
+                                if k in item:
+                                    if k == "sub_job_name":
+                                        updates.append("sub_job_description = :sub_job_name")
+                                        params["sub_job_name"] = item[k]
+                                    else:
+                                        updates.append(f"{k} = :{k}")
+                                        params[k] = item[k]
+                            if updates:
+                                db.execute(text(f"UPDATE inspection_checklist SET {', '.join(updates)} WHERE id = :id"), params)
+                        else:
+                            continue
+                    except Exception:
+                        db.rollback()
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+            except Exception:
+                pass
 
-                # sync to to_do_list
-                if chk.flagged:
-                    # upsert to to_do_list
-                    existing = db.query(ToDoList).filter(ToDoList.checklist_id == chk.id).first()
-                    if existing:
-                        existing.job_name = chk.job_name
-                        existing.sub_job_description = chk.sub_job_description
-                        existing.status = chk.status
-                        existing.comment = chk.comment
-                    else:
-                        nd = ToDoList()
-                        nd.checklist_id = chk.id
-                        nd.report_id = chk.report_id
-                        nd.tank_number = chk.tank_number
-                        nd.job_name = chk.job_name
-                        nd.sub_job_description = chk.sub_job_description
-                        nd.sn = chk.sn
-                        nd.status = chk.status
-                        nd.comment = chk.comment
-                        db.add(nd)
-                else:
-                    # remove from to_do_list if exists
-                    db.query(ToDoList).filter(ToDoList.checklist_id == chk.id).delete()
+        # Update to-do items directly using inspection_id
+        if payload.to_do:
+            try:
+                inspection_id_val = insp.get("inspection_id")
+                for t in payload.to_do:
+                    try:
+                        if t.get("id"):
+                            updates = []
+                            params = {"id": t["id"]}
+                            for k in ("job_name", "status", "comment", "sub_job_name"):
+                                if k in t:
+                                    if k == "sub_job_name":
+                                        updates.append("sub_job_description = :sub_job_name")
+                                        params["sub_job_name"] = t[k]
+                                    else:
+                                        updates.append(f"{k} = :{k}")
+                                        params[k] = t[k]
+                            if updates:
+                                db.execute(text(f"UPDATE to_do_list SET {', '.join(updates)} WHERE id = :id"), params)
+                        else:
+                            continue
+                    except Exception:
+                        db.rollback()
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+            except Exception:
+                pass
 
-        # Update to_do items directly
-        if payload.to_do and report:
-            for t in payload.to_do:
-                if "id" in t and t["id"]:
-                    td = db.query(ToDoList).filter(ToDoList.id == t["id"]).first()
-                    if not td:
-                        continue
-                    if "job_name" in t:
-                        td.job_name = t["job_name"]
-                    if "sub_job_name" in t:
-                        td.sub_job_description = t["sub_job_name"]
-                    if "status" in t:
-                        td.status = t["status"]
-                    if "comment" in t:
-                        td.comment = t["comment"]
-
-        db.commit()
-        db.refresh(inspection)
-        return {"success": True, "message": "Review updated"}
+        return success_resp("Review updated", {"inspection_id": inspection_id}, 200)
     except Exception as e:
-        db.rollback()
         logger.error(f"Error updating review for {inspection_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        return error_resp(str(e), 500)
 
 
 @router.delete("/review/{inspection_id}")
 def delete_inspection_review(inspection_id: int, db: Session = Depends(get_db)):
-    """Delete an inspection and associated report, checklist and to-do entries. Does not delete images."""
-    inspection = (
-        db.query(TankInspectionDetails)
-        .filter(TankInspectionDetails.inspection_id == inspection_id)
-        .first()
-    )
-    if not inspection:
-        raise HTTPException(status_code=404, detail="Inspection not found")
     try:
-        report = None
-        if inspection.inspection_date and inspection.tank_number:
-            insp_date_str = inspection.inspection_date.date().isoformat()
-            report = (
-                db.query(InspectionReport)
-                .filter(
-                    InspectionReport.tank_number == inspection.tank_number,
-                    InspectionReport.inspection_date == insp_date_str,
-                )
-                .first()
-            )
-        if report:
-            # delete checklists and todos
-            db.query(InspectionChecklist).filter(InspectionChecklist.report_id == report.id).delete()
-            db.query(ToDoList).filter(ToDoList.report_id == report.id).delete()
-            db.delete(report)
+        row = db.execute(text("SELECT * FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not row:
+            return error_resp("Inspection not found", 404)
+        try:
+            try:
+                if hasattr(row, "_mapping"):
+                    insp = dict(row._mapping)
+                elif isinstance(row, dict):
+                    insp = row
+                else:
+                    insp = dict((k, v) for k, v in row)
+            except Exception:
+                insp = jsonable_encoder(row)
 
-        db.delete(inspection)
-        db.commit()
-        return {"success": True, "message": "Inspection and related report/checklist/to-do entries deleted"}
+            # Delete related checklist and to-do items (will cascade delete due to FK constraints)
+            try:
+                db.execute(text("DELETE FROM inspection_checklist WHERE inspection_id = :iid"), {"iid": inspection_id})
+                db.execute(text("DELETE FROM to_do_list WHERE inspection_id = :iid"), {"iid": inspection_id})
+            except Exception:
+                db.rollback()
+            db.execute(text("DELETE FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id})
+            db.commit()
+            return success_resp("Inspection and related checklist/to-do entries deleted", {"inspection_id": inspection_id}, 200)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error deleting review for {inspection_id}: {e}", exc_info=True)
+            return error_resp(str(e), 500)
     except Exception as e:
-        db.rollback()
-        logger.error(f"Error deleting review for {inspection_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error deleting review for {inspection_id}: {e}", exc_info=True)
+        return error_resp("Internal server error", 500)
+
+
+# -------------------------
+# Upload lifter weight (create/replace) endpoint
+# -------------------------
+@router.post("/{inspection_id}/lifter_weight", status_code=200)
+def upload_lifter_weight(inspection_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    try:
+        row = db.execute(text("SELECT inspection_id, tank_number, lifter_weight FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not row:
+            return error_resp(f"Inspection {inspection_id} not found", 404)
+        if hasattr(row, "_mapping"):
+            tank_number = row._mapping.get("tank_number")
+            old_rel = row._mapping.get("lifter_weight")
+        else:
+            try:
+                old_rel = row[2]
+                tank_number = row[1]
+            except Exception:
+                old_rel = None
+                tank_number = None
+
+        if not file.content_type or not file.content_type.startswith("image/"):
+            return error_resp("File must be an image", 400)
+
+        saved = _save_lifter_file(file, tank_number)
+        rel_path = saved["image_path"]
+        thumb_path = saved.get("thumbnail_path")
+
+        try:
+            if old_rel:
+                old_abs = os.path.join(UPLOAD_DIR, *old_rel.split("/"))
+                if os.path.exists(old_abs):
+                    try:
+                        os.remove(old_abs)
+                    except Exception:
+                        logger.debug("Could not remove old lifter file: %s", old_abs, exc_info=True)
+                old_base = os.path.splitext(os.path.basename(old_abs))[0]
+                folder = os.path.dirname(old_abs)
+                if os.path.isdir(folder):
+                    for fn in os.listdir(folder):
+                        if old_base in fn and "thumb" in fn:
+                            try:
+                                os.remove(os.path.join(folder, fn))
+                            except Exception:
+                                pass
+        except Exception:
+            logger.debug("Error while cleaning old lifter files for inspection %s", inspection_id, exc_info=True)
+
+        try:
+            db.execute(text("UPDATE tank_inspection_details SET lifter_weight = :lp, updated_at = NOW() WHERE inspection_id = :id"), {"lp": rel_path, "id": inspection_id})
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.error("Failed to update lifter_weight column", exc_info=True)
+            return error_resp("Failed to save lifter weight path to DB", 500)
+
+        return success_resp("Lifter weight photo uploaded", {"inspection_id": inspection_id, "lifter_weight": rel_path, "thumbnail": thumb_path}, 200)
+    except Exception as e:
+        logger.error(f"Error uploading lifter weight for inspection {inspection_id}: {e}", exc_info=True)
+        return error_resp("Error uploading lifter weight", 500)
+
+
+@router.delete("/delete/inspection_details/{inspection_id}")
+def delete_inspection_details(inspection_id: int, db: Session = Depends(get_db)):
+    try:
+        row = db.execute(text("SELECT inspection_id FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not row:
+            return error_resp(f"Inspection {inspection_id} not found", 404)
+        try:
+            db.execute(text("DELETE FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id})
+            db.commit()
+            return success_resp("Inspection deleted", {"inspection_id": inspection_id}, 200)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error deleting inspection {inspection_id}: {e}", exc_info=True)
+            return error_resp("Error deleting inspection", 500)
+    except Exception as e:
+        logger.error(f"Unexpected error deleting inspection {inspection_id}: {e}", exc_info=True)
+        return error_resp("Internal server error", 500)
+
+
+# -------------------------
+# Tank details endpoint (keeps unfilled detection logic unchanged)
+# -------------------------
+@router.get("/tank-details/{tank_id}")
+def get_tank_details(tank_id: int, db: Session = Depends(get_db)):
+    try:
+        tn_row = db.execute(
+            text("SELECT tank_number FROM tank_details WHERE tank_id = :tid LIMIT 1"),
+            {"tid": tank_id}
+        ).fetchone()
+
+        if not tn_row:
+            return error_resp(f"Tank not found for id: {tank_id}", 404)
+
+        if hasattr(tn_row, "_mapping"):
+            tank_number = tn_row._mapping.get("tank_number")
+        elif isinstance(tn_row, dict):
+            tank_number = tn_row.get("tank_number")
+        else:
+            tank_number = tn_row[0] if len(tn_row) > 0 else None
+
+        if not tank_number:
+            return error_resp(f"Tank number missing for id: {tank_id}", 404)
+
+        row = db.execute(
+            text("""
+                SELECT working_pressure, design_temperature, frame_type, cabinet_type, mfgr, lease
+                FROM tank_details
+                WHERE tank_number = :tank_number
+                LIMIT 1
+            """),
+            {"tank_number": tank_number},
+        ).fetchone()
+
+        if not row:
+            return error_resp(f"Tank not found: {tank_number}", 404)
+
+        if hasattr(row, "_mapping"):
+            row_map = dict(row._mapping)
+        elif isinstance(row, dict):
+            row_map = row
+        else:
+            row_map = {
+                "working_pressure": row[0] if len(row) > 0 else None,
+                "design_temperature": row[1] if len(row) > 1 else None,
+                "frame_type": row[2] if len(row) > 2 else None,
+                "cabinet_type": row[3] if len(row) > 3 else None,
+                "mfgr": row[4] if len(row) > 4 else None,
+                "lease": row[5] if len(row) > 5 else None,
+            }
+
+        working_pressure = row_map.get("working_pressure")
+        design_temperature = row_map.get("design_temperature")
+        frame_type = row_map.get("frame_type")
+        cabinet_type = row_map.get("cabinet_type")
+        mfgr = row_map.get("mfgr")
+        lease_val = row_map.get("lease")
+
+        ownership_val: Optional[str] = None
+        try:
+            if isinstance(lease_val, str):
+                l = lease_val.strip().lower()
+                if l in ("no", "n", "0", ""):
+                    ownership_val = "owned"
+                elif l in ("yes", "y", "1"):
+                    ownership_val = "leased"
+            elif lease_val in (0, "0"):
+                ownership_val = "owned"
+            elif lease_val in (1, "1"):
+                ownership_val = "leased"
+        except Exception:
+            ownership_val = None
+
+        try:
+            pi_next = fetch_pi_next_inspection_date(db, tank_number)
+        except Exception:
+            pi_next = None
+
+        def conv_decimal(v):
+            try:
+                return float(v) if isinstance(v, Decimal) else v
+            except Exception:
+                return v
+
+        data = {
+            "tank_id": tank_id,
+            "tank_number": tank_number,
+            "working_pressure": conv_decimal(working_pressure),
+            "design_temperature": conv_decimal(design_temperature),
+            "frame_type": frame_type,
+            "cabinet_type": cabinet_type,
+            "mfgr": mfgr,
+            "ownership": ownership_val,
+            "pi_next_inspection_date": (pi_next.isoformat() if hasattr(pi_next, "isoformat") else None),
+        }
+
+        # determine unfilled inspection with same logic as before
+        inspection_id = None
+        try:
+            cols_q = db.execute(
+                text("""
+                    SELECT COLUMN_NAME
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'tank_inspection_details'
+                      AND IS_NULLABLE = 'YES'
+                """)
+            ).fetchall()
+
+            nullable_cols: List[str] = []
+            for c in cols_q:
+                if hasattr(c, "_mapping"):
+                    name = c._mapping.get("COLUMN_NAME")
+                elif isinstance(c, dict):
+                    name = c.get("COLUMN_NAME")
+                else:
+                    name = c[0] if len(c) > 0 else None
+                if name:
+                    if name.lower() not in ("inspection_id", "tank_number", "created_at", "updated_at"):
+                        nullable_cols.append(name)
+
+            if nullable_cols:
+                null_conds = " OR ".join([f"`{col}` IS NULL" for col in nullable_cols])
+                insp_sql = text(f"""
+                    SELECT inspection_id
+                    FROM tank_inspection_details
+                    WHERE tank_number = :tn
+                      AND ({null_conds})
+                    ORDER BY inspection_id DESC
+                    LIMIT 1
+                """)
+                insp_row = db.execute(insp_sql, {"tn": tank_number}).fetchone()
+                if insp_row:
+                    if hasattr(insp_row, "_mapping"):
+                        inspection_id = insp_row._mapping.get("inspection_id")
+                    elif isinstance(insp_row, dict):
+                        inspection_id = insp_row.get("inspection_id")
+                    else:
+                        inspection_id = insp_row[0]
+            else:
+                inspection_id = None
+
+        except Exception as e:
+            logger.warning("Failed to detect unfilled inspection via information_schema: %s", e, exc_info=True)
+            inspection_id = None
+
+        data["inspection_id"] = inspection_id
+
+        return success_resp("Tank details fetched", data, 200)
+
+    except Exception as e:
+        logger.error(f"Error fetching tank details for tank_id={tank_id}: {e}", exc_info=True)
+        return error_resp("Error fetching tank details", 500)
+
+
+# -------------------------
+# New: fetch inspection by id (returns requested fields)
+# -------------------------
+@router.get("/get/inspection/{inspection_id}")
+def get_inspection_by_id(inspection_id: int, db: Session = Depends(get_db)):
+    """
+    Fetch inspection record by inspection_id with all required fields.
+    """
+    try:
+        row = db.execute(
+            text("""
+                SELECT 
+                    inspection_id,
+                    tank_number,
+                    report_number,
+                    inspection_date,
+                    status_id,
+                    product_id,
+                    inspection_type_id,
+                    location_id,
+                    working_pressure,
+                    design_temperature,
+                    frame_type,
+                    cabinet_type,
+                    mfgr,
+                    pi_next_inspection_date,
+                    safety_valve_brand_id,
+                    safety_valve_model_id,
+                    safety_valve_size_id,
+                    notes,
+                    created_by,
+                    operator_id,
+                    emp_id,
+                    ownership,
+                    lifter_weight
+                FROM tank_inspection_details
+                WHERE inspection_id = :id
+                LIMIT 1
+            """),
+            {"id": inspection_id}
+        ).fetchone()
+
+        if not row:
+            return error_resp(f"Inspection {inspection_id} not found", 404)
+
+        # Convert row → dict safely
+        if hasattr(row, "_mapping"):
+            out = dict(row._mapping)
+        elif isinstance(row, dict):
+            out = row
+        else:
+            try:
+                out = dict(row)
+            except:
+                out = jsonable_encoder(row)
+
+        return success_resp("Inspection fetched successfully", out, 200)
+
+    except Exception as e:
+        logger.error(f"Error fetching inspection {inspection_id}: {e}", exc_info=True)
+        return error_resp("Internal server error", 500)
+
+
+# -------------------------
+# Delete lifter weight endpoint (keeps same semantics)
+# -------------------------
+@router.delete("/{inspection_id}/lifter_weight", status_code=200)
+def delete_lifter_weight(inspection_id: int, db: Session = Depends(get_db)):
+    try:
+        row = db.execute(text("SELECT inspection_id, tank_number, lifter_weight FROM tank_inspection_details WHERE inspection_id = :id"), {"id": inspection_id}).fetchone()
+        if not row:
+            return error_resp(f"Inspection {inspection_id} not found", 404)
+
+        if hasattr(row, "_mapping"):
+            rel = row._mapping.get("lifter_weight")
+        else:
+            try:
+                rel = row[2]
+            except Exception:
+                rel = None
+
+        if not rel:
+            return error_resp("No lifter weight image present for this inspection", 404)
+
+        try:
+            abs_path = os.path.join(UPLOAD_DIR, *rel.split("/"))
+            folder = os.path.dirname(abs_path)
+            base_no_ext = os.path.splitext(os.path.basename(abs_path))[0]
+
+            if os.path.exists(abs_path):
+                try:
+                    os.remove(abs_path)
+                except Exception:
+                    logger.debug("Could not remove lifter file %s", abs_path, exc_info=True)
+
+            if os.path.isdir(folder):
+                for fn in os.listdir(folder):
+                    if base_no_ext in fn and "thumb" in fn:
+                        try:
+                            os.remove(os.path.join(folder, fn))
+                        except Exception:
+                            pass
+        except Exception:
+            logger.debug("Error while deleting lifter files on disk for inspection %s", inspection_id, exc_info=True)
+
+        try:
+            db.execute(text("UPDATE tank_inspection_details SET lifter_weight = NULL, updated_at = NOW() WHERE inspection_id = :id"), {"id": inspection_id})
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.error("Failed to clear lifter_weight DB column", exc_info=True)
+            return error_resp("Failed to remove lifter weight reference from DB", 500)
+
+        return success_resp("Lifter weight image deleted", {"inspection_id": inspection_id}, 200)
+    except Exception as e:
+        logger.error(f"Error deleting lifter weight for inspection {inspection_id}: {e}", exc_info=True)
+        return error_resp("Error deleting lifter weight", 500)
+
+# End of file

@@ -13,15 +13,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/to_do_list", tags=["to_do_list"])
 
 
+# ----------------------------
+# RESPONSE MODELS
+# ----------------------------
 class ToDoListResponse(BaseModel):
     id: int
     checklist_id: int
-    report_id: int
+    inspection_id: int
     tank_number: str
     job_name: Optional[str]
     sub_job_description: Optional[str]
     sn: str
-    status: Optional[str]
+    status_id: Optional[int]
     comment: Optional[str]
     created_at: str
 
@@ -31,54 +34,56 @@ class GenericResponse(BaseModel):
     data: List[dict]
 
 
+# ----------------------------
+# HELPER: SYNC FLAGGED ITEMS
+# ----------------------------
 def _sync_flagged_to_todo(cursor, checklist_id: int):
     """
-    Helper to sync a flagged checklist item to to_do_list table.
-    Fetches the checklist row and inserts/updates to to_do_list if flagged=1.
+    Sync a flagged checklist row to to_do_list.
+    Now uses inspection_id instead of report_id.
     """
-    # Get the flagged checklist row
     cursor.execute("""
-        SELECT id, report_id, tank_number, job_name, sub_job_description, sn, status, comment, created_at
+        SELECT id, inspection_id, tank_number, job_name, sub_job_description, sn, status_id, comment, created_at
         FROM inspection_checklist
         WHERE id=%s AND flagged=1
     """, (checklist_id,))
-    
     row = cursor.fetchone()
     if not row:
-        return  # Not flagged or doesn't exist
-    
-    # Insert or update in to_do_list
+        return
     cursor.execute("""
-        INSERT INTO to_do_list (checklist_id, report_id, tank_number, job_name, sub_job_description, sn, status, comment, created_at)
+        INSERT INTO to_do_list (checklist_id, inspection_id, tank_number, job_name, sub_job_description, sn, status_id, comment, created_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
+            inspection_id=VALUES(inspection_id),
             tank_number=VALUES(tank_number),
             job_name=VALUES(job_name),
             sub_job_description=VALUES(sub_job_description),
-            status=VALUES(status),
+            status_id=VALUES(status_id),
             comment=VALUES(comment)
     """, (
         checklist_id,
-        row['report_id'],
+        row['inspection_id'],
         row['tank_number'],
         row['job_name'],
         row['sub_job_description'],
         row['sn'],
-        row['status'],
+        row['status_id'],
         row['comment'],
         row['created_at']
     ))
 
 
+# ----------------------------
+# GET ALL TO-DO ITEMS
+# ----------------------------
 @router.get("/list", response_model=GenericResponse)
 def get_to_do_list():
-    """Get all flagged items from to_do_list table"""
     conn = get_db_connection()
     try:
         with conn.cursor(DictCursor) as cursor:
             cursor.execute("""
-                SELECT id, checklist_id, report_id, tank_number, job_name, sub_job_description, 
-                       sn, status, comment, created_at
+                SELECT id, checklist_id, inspection_id, tank_number, job_name, sub_job_description,
+                       sn, status_id, comment, created_at
                 FROM to_do_list
                 ORDER BY created_at DESC
             """)
@@ -88,43 +93,48 @@ def get_to_do_list():
         conn.close()
 
 
+# ----------------------------
+# DELETE TO-DO ITEM
+# ----------------------------
 @router.delete("/delete/{to_do_id}")
 def delete_to_do_item(to_do_id: int):
-    """Delete a to_do_list item by ID"""
     conn = get_db_connection()
     try:
         with conn.cursor(DictCursor) as cursor:
-            # Check if exists
             cursor.execute("SELECT 1 FROM to_do_list WHERE id=%s", (to_do_id,))
             if not cursor.fetchone():
                 raise HTTPException(status_code=404, detail=f"To-do item {to_do_id} not found")
             
-            # Delete from to_do_list
             cursor.execute("DELETE FROM to_do_list WHERE id=%s", (to_do_id,))
             conn.commit()
-            
             return {"success": True, "data": {"id": to_do_id}}
     finally:
         conn.close()
 
 
-@router.get("/checklist/{checklist_id}")
-def get_to_do_by_checklist(checklist_id: int):
-    """Get to_do_list item by checklist_id"""
+# ----------------------------
+# GET FLAGGED ITEMS BY INSPECTION_ID
+# ----------------------------
+@router.get("/flagged/inspection/{inspection_id}")
+def get_flagged_by_inspection(inspection_id: int):
+    """
+    Fetch all flagged items for a specific inspection_id from to_do_list.
+    """
     conn = get_db_connection()
     try:
         with conn.cursor(DictCursor) as cursor:
             cursor.execute("""
-                SELECT id, checklist_id, report_id, tank_number, job_name, sub_job_description,
-                       sn, status, comment, created_at
+                SELECT id, checklist_id, inspection_id, tank_number, job_name, sub_job_description,
+                       sn, status_id, comment, created_at
                 FROM to_do_list
-                WHERE checklist_id=%s
-            """, (checklist_id,))
+                WHERE inspection_id=%s
+                ORDER BY created_at DESC
+            """, (inspection_id,))
             
-            row = cursor.fetchone()
-            if not row:
-                return {"success": False, "data": None}
-            
-            return {"success": True, "data": row}
+            rows = cursor.fetchall()
+            return {"success": True, "data": rows}
+    except Exception as e:
+        logger.error(f"Error fetching flagged items for inspection {inspection_id}: {e}", exc_info=True)
+        return {"success": False, "data": [], "error": str(e)}
     finally:
         conn.close()

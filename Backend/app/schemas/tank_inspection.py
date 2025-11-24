@@ -2,73 +2,66 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
-
+# ---------------------------------------------------------
+# CREATE SCHEMA — user enters tank_id instead of tank_number
+# ---------------------------------------------------------
 class TankInspectionCreate(BaseModel):
-    created_by: str
-    inspection_type_name: str
-    location_name: str
+    created_by: str = Field(..., description="User who created the record")
+    tank_id: int = Field(..., description="Foreign key: tank_details.tank_id")
+    status_id: int
+    product_id: int
+    inspection_type_id: int
+    location_id: int
+    safety_valve_brand_id: Optional[int] = None
+    safety_valve_model_id: Optional[int] = None
+    safety_valve_size_id: Optional[int] = None
     notes: Optional[str] = None
     operator_id: Optional[int] = None
-    product_name: str
-    safety_valve_brand: Optional[str] = None
-    safety_valve_model: Optional[str] = None
-    safety_valve_size: Optional[str] = None
-    status_name: str
-    tank_number: str
-
 
     class Config:
-        json_schema_extra = {
+        schema_extra = {
             "example": {
-                "tank_number": "",
-                "status_name": "",
-                "inspection_type_name": "",
-                "product_name": "",
-                "location_name": "",
-                "safety_valve_brand": "",
-                "safety_valve_model": "",
-                "safety_valve_size": "",
-                "notes": "",
-                "created_by": "",
-                "operator_id": None
+                "created_by": "user@example.com",
+                "tank_id": 12,
+                "status_id": 1,
+                "product_id": 3,
+                "inspection_type_id": 2,
+                "location_id": 4,
+                "safety_valve_brand_id": 2,
+                "safety_valve_model_id": 1,
+                "safety_valve_size_id": 1,
+                "notes": "All checks OK",
+                "operator_id": 55
             }
         }
 
 
+# ---------------------------------------------------------
+# RESPONSE SCHEMA — tank_number present because DB stores it
+# ---------------------------------------------------------
 class TankInspectionResponse(BaseModel):
-    """Schema for tank inspection response"""
     inspection_id: int
-    tank_number: str
-    report_number: str
-    inspection_date: datetime
+
     status_id: Optional[int] = None
     product_id: Optional[int] = None
     inspection_type_id: Optional[int] = None
     location_id: Optional[int] = None
-    working_pressure: Optional[float] = None
-    design_temperature: Optional[float] = None
-    frame_type: Optional[str] = None
-    cabinet_type: Optional[str] = None
-    mfgr: Optional[str] = None
-    pi_next_inspection_date: Optional[datetime] = None
-    safety_valve_brand: Optional[str] = None
-    safety_valve_model: Optional[str] = None
-    safety_valve_size: Optional[str] = None
-    notes: Optional[str] = None
-    created_by: Optional[str] = None
-    operator_id: Optional[int] = None
-    operator_name: Optional[str] = None
-    ownership: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
 
+    safety_valve_brand_id: Optional[int] = None
+    safety_valve_model_id: Optional[int] = None
+    safety_valve_size_id: Optional[int] = None
+
+    class Config:
+        orm_mode = True
+
+
+# ---------------------------------------------------------
+# UPDATE SCHEMA — tank_id/tank_number removed fully
+# ---------------------------------------------------------
 class TankInspectionUpdate(BaseModel):
-    """Request schema for updating a tank inspection record (supports partial updates)."""
-
-    # core / header fields
     inspection_date: Optional[datetime] = None
-    tank_number: Optional[str] = None
-    # you can send either *_id or *_name (name will be mapped to id)
+
+    # master fields
     status_id: Optional[int] = None
     status_name: Optional[str] = None
 
@@ -81,14 +74,14 @@ class TankInspectionUpdate(BaseModel):
     location_id: Optional[int] = None
     location_name: Optional[str] = None
 
-    # tank_details-ish fields (allow override if needed)
+    # tank details
     working_pressure: Optional[float] = None
     frame_type: Optional[str] = None
     design_temperature: Optional[float] = None
     cabinet_type: Optional[str] = None
     mfgr: Optional[str] = None
 
-    # safety valve fields
+    # safety valve
     safety_valve_brand: Optional[str] = None
     safety_valve_model: Optional[str] = None
     safety_valve_size: Optional[str] = None
@@ -96,7 +89,7 @@ class TankInspectionUpdate(BaseModel):
     # misc
     notes: Optional[str] = None
     operator_id: Optional[int] = None
-    ownership: Optional[str] = None  # "OWN" / "LEASED" if you ever want to override
+    ownership: Optional[str] = None
 
     class Config:
         from_attributes = True

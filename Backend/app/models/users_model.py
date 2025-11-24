@@ -1,3 +1,4 @@
+# app/models/users_model.py
 from sqlalchemy import Column, Integer, String, DateTime, func
 from app.database import Base
 
@@ -15,5 +16,6 @@ class User(Base):
     email = Column(String(150), nullable=False, unique=True)
     password_hash = Column(String(255), nullable=False)
     password_salt = Column(String(64), nullable=False)
+    role = Column(String(50), nullable=False, default='user')
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
