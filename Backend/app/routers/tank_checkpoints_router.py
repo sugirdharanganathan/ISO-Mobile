@@ -264,21 +264,45 @@ def _get_token_subject(Authorization: Optional[str]):
         return None
 
 
-def _sync_flagged_to_todo(cursor, checklist_id):
+def _sync_flagged_to_todo(cursor, checklist_id: int):
+    """
+    Sync a flagged checklist row to to_do_list.
+    Ensures commit and logs errors. Returns True on success, False otherwise.
+    """
     try:
-        cursor.execute("SELECT id, inspection_id, tank_id, job_name, sub_job_name, sn, status_id, comment, created_at FROM inspection_checklist WHERE id=%s LIMIT 1", (checklist_id,))
+        cursor.execute(
+            "SELECT id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at "
+            "FROM inspection_checklist WHERE id=%s LIMIT 1",
+            (checklist_id,)
+        )
         r = cursor.fetchone()
         if not r:
-            return
+            logger.debug("_sync_flagged_to_todo: no inspection_checklist row for id=%s", checklist_id)
+            return False
+
+        # Use ON DUPLICATE KEY UPDATE to keep to_do_list in sync if you have a unique key (e.g. checklist_id)
         try:
             cursor.execute(
-                "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_name, sn, status_id, comment, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                """
+                INSERT INTO to_do_list
+                  (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                  inspection_id=VALUES(inspection_id),
+                  tank_id=VALUES(tank_id),
+                  job_name=VALUES(job_name),
+                  sub_job_description=VALUES(sub_job_description),
+                  sn=VALUES(sn),
+                  status_id=VALUES(status_id),
+                  comment=VALUES(comment),
+                  created_at=VALUES(created_at)
+                """,
                 (
                     r.get("id"),
                     r.get("inspection_id"),
                     r.get("tank_id"),
                     r.get("job_name"),
-                    r.get("sub_job_name"),
+                    r.get("sub_job_description"),
                     r.get("sn") or "",
                     r.get("status_id"),
                     r.get("comment"),
@@ -286,24 +310,50 @@ def _sync_flagged_to_todo(cursor, checklist_id):
                 ),
             )
         except Exception:
+            # Fallback: some schemas may not have created_at or allow it; try inserting without created_at
             try:
                 cursor.execute(
-                    "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_name, sn, status_id, comment) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                    """
+                    INSERT INTO to_do_list
+                      (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                      inspection_id=VALUES(inspection_id),
+                      tank_id=VALUES(tank_id),
+                      job_name=VALUES(job_name),
+                      sub_job_description=VALUES(sub_job_description),
+                      sn=VALUES(sn),
+                      status_id=VALUES(status_id),
+                      comment=VALUES(comment)
+                    """,
                     (
                         r.get("id"),
                         r.get("inspection_id"),
                         r.get("tank_id"),
                         r.get("job_name"),
-                        r.get("sub_job_name"),
+                        r.get("sub_job_description"),
                         r.get("sn") or "",
                         r.get("status_id"),
                         r.get("comment"),
                     ),
                 )
             except Exception:
-                logger.exception("Failed to insert to to_do_list in _sync_flagged_to_todo")
+                logger.exception("Failed to insert to to_do_list in _sync_flagged_to_todo (fallback)")
+                return False
+
+        # commit the change so it persists
+        try:
+            cursor.connection.commit()
+        except Exception:
+            # if commit fails log it but don't crash
+            logger.exception("Failed to commit in _sync_flagged_to_todo after INSERT")
+            # still return True because INSERT executed; caller can decide further action
+        logger.debug("_sync_flagged_to_todo: synced checklist_id=%s to to_do_list", checklist_id)
+        return True
     except Exception:
-        logger.exception("_sync_flagged_to_todo failed")
+        logger.exception("_sync_flagged_to_todo failed for checklist_id=%s", checklist_id)
+        return False
+
 
 
 @router.get("/inspection_status")
@@ -480,7 +530,8 @@ def create_inspection_checklist_bulk(
                 {
                     "job_id": "6",
                     "title": "Others Observation & Comment",
-                    "status_id": "",
+                    "status_id": None,
+                    "comment": "",
                     "items": []
                 }
             ]
@@ -549,33 +600,38 @@ def create_inspection_checklist_bulk(
                 status_id_final_job = status_id_norm if status_id_norm is not None else 1
 
                 for item in section.items:
-                    # select all columns for sub-job and pick available fields
-                    # try sub-job by `id` first, then fall back to `sub_job_id` if available
-                    # Lookup sub-job by id under the found job. If not found, attempt to match by sub_job_name or description using provided title or sub_job_id string.
-                    # Prefer matching by `sub_job_id` (per-job index). Fall back to legacy `id` if necessary.
+                    # ---------- find sub_row ----------
                     sub_row = None
+                    jid_val = job_row.get("id") or job_row.get("job_id")
                     try:
-                        sub_row = db.execute(text("SELECT * FROM inspection_sub_job WHERE sub_job_id = :sid AND job_id = :jid LIMIT 1"), {"sid": item.sub_job_id, "jid": job_row.get("id") or job_row.get("job_id")}).mappings().fetchone()
+                        sub_row = db.execute(
+                            text("SELECT * FROM inspection_sub_job WHERE sub_job_id=:sid AND job_id=:jid LIMIT 1"),
+                            {"sid": item.sub_job_id, "jid": jid_val}
+                        ).mappings().fetchone()
                     except Exception:
                         sub_row = None
                     if not sub_row:
                         try:
-                            sub_row = db.execute(text("SELECT * FROM inspection_sub_job WHERE id = :sid AND job_id = :jid LIMIT 1"), {"sid": item.sub_job_id, "jid": job_row.get("id") or job_row.get("job_id")}).mappings().fetchone()
+                            sub_row = db.execute(
+                                text("SELECT * FROM inspection_sub_job WHERE id=:sid AND job_id=:jid LIMIT 1"),
+                                {"sid": item.sub_job_id, "jid": jid_val}
+                            ).mappings().fetchone()
                         except Exception:
                             sub_row = None
+
                     if not sub_row:
+                        # fallback matching logic (positional or name match)
                         sstr = str(item.sub_job_id).strip() if item.sub_job_id is not None else ""
                         title_str = (item.title or "").strip()
-                        # Fetch sub-jobs for this job and match in Python to avoid unknown-column SQL errors
-                        jid_val = job_row.get("id") or job_row.get("job_id")
                         try:
-                            # Order by explicit per-job id when present, then by internal id
-                            candidate_subs = db.execute(text("SELECT * FROM inspection_sub_job WHERE job_id = :jid ORDER BY COALESCE(sub_job_id, id), id"), {"jid": jid_val}).mappings().fetchall()
+                            candidate_subs = db.execute(
+                                text("SELECT * FROM inspection_sub_job WHERE job_id = :jid ORDER BY COALESCE(sub_job_id, id), id"),
+                                {"jid": jid_val}
+                            ).mappings().fetchall()
                         except Exception:
                             candidate_subs = []
+
                         sub_row = None
-                        # If client passed a small integer like 1,2,3 that represents the per-job sub_job_id,
-                        # try matching against the stored `sub_job_id` first, then positional fallback.
                         if sstr.isdigit():
                             try:
                                 sid_int = int(sstr)
@@ -592,7 +648,6 @@ def create_inspection_checklist_bulk(
 
                         if sub_row is None:
                             for sr in candidate_subs:
-                                # match by numeric id, or by name/description/sn against provided values
                                 if sstr != "":
                                     if ("id" in sr and str(sr.get("id")) == sstr) or ("sub_job_id" in sr and str(sr.get("sub_job_id")) == sstr):
                                         sub_row = sr
@@ -604,13 +659,15 @@ def create_inspection_checklist_bulk(
                                             break
                                     if sub_row:
                                         break
+
                     if not sub_row:
                         return _error(f"Sub-job not found: {item.sub_job_id}", status_code=400)
+
                     # use job-level status_id for all sub-jobs
                     status_id_final = status_id_final_job
                     # flagged only if status_id == 2
                     flagged_val = 1 if (status_id_final in FAULTY_STATUS_IDS) else 0
-                    # Prefer the client's provided `sn` (e.g., "1.1", "4.3"); if absent, fall back to stored sn or a compact name
+                    # Prefer the client's provided `sn` (e.g. "1.1", "4.3"); if absent, fall back to stored sn or a compact name
                     if item.sn and str(item.sn).strip() != "":
                         sn_val = str(item.sn).strip()
                     else:
@@ -623,6 +680,12 @@ def create_inspection_checklist_bulk(
                         else:
                             sn_val = ""
 
+                    # Use DB canonical job id if available, otherwise fall back to provided section.job_id (less preferable)
+                    db_job_id = None
+                    if job_row is not None:
+                        db_job_id = job_row.get("id") or job_row.get("job_id")
+
+                    # ---- INSERT the checklist row (moved OUT of the 'else' fallback) ----
                     db.execute(text(
                         "INSERT INTO inspection_checklist (inspection_id, tank_id, emp_id, job_id, job_name, sn, sub_job_id, sub_job_description, status_id, comment, flagged, created_at)"
                         " VALUES (:inspection_id, :tank_id, :emp_id, :job_id, :job_name, :sn, :sub_job_id, :sub_job_description, :status_id, :comment, :flagged, NOW())"
@@ -630,7 +693,7 @@ def create_inspection_checklist_bulk(
                         "inspection_id": inspection_id,
                         "tank_id": tank_id,
                         "emp_id": emp_id,
-                        "job_id": section.job_id,
+                        "job_id": db_job_id if db_job_id is not None else section.job_id,
                         "job_name": job_row.get("job_name") or job_row.get("job") or None,
                         "sn": sn_val,
                         "sub_job_id": sub_row.get("sub_job_id") or sub_row.get("id"),
@@ -641,28 +704,33 @@ def create_inspection_checklist_bulk(
                     })
 
                     # Only sync flagged items (status_id == 2) into to_do_list
+                    # After inserting inspection_checklist row above:
                     if flagged_val:
                         try:
+                            # select the most recent row matching the unique tuple we inserted (inspection, tank, job, sub_job)
                             sel = db.execute(text(
-                                "SELECT id, job_name, sub_job_description, sn, status_id, comment, created_at, tank_id, inspection_id FROM inspection_checklist "
+                                "SELECT id, job_name, sub_job_description, sn, status_id, comment, created_at, tank_id, inspection_id "
+                                "FROM inspection_checklist "
                                 "WHERE inspection_id = :inspection_id AND tank_id = :tank_id AND job_id = :job_id AND sub_job_id = :sub_job_id "
                                 "ORDER BY id DESC LIMIT 1"
                             ), {
                                 "inspection_id": inspection_id,
                                 "tank_id": tank_id,
-                                "job_id": section.job_id,
+                                "job_id": db_job_id if db_job_id is not None else section.job_id,
                                 "sub_job_id": sub_row.get("sub_job_id") or sub_row.get("id")
                             }).mappings().fetchone()
+
                             if sel:
                                 db.execute(text(
-                                    "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_name, sn, status_id, comment, created_at) "
-                                    "VALUES (:checklist_id, :inspection_id, :tank_id, :job_name, :sub_job_name, :sn, :status_id, :comment, :created_at)"
+                                    "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at) "
+                                    "VALUES (:checklist_id, :inspection_id, :tank_id, :job_name, :sub_job_description, :sn, :status_id, :comment, :created_at) "
+                                    "ON DUPLICATE KEY UPDATE inspection_id=VALUES(inspection_id), tank_id=VALUES(tank_id), job_name=VALUES(job_name), sub_job_description=VALUES(sub_job_description), sn=VALUES(sn), status_id=VALUES(status_id), comment=VALUES(comment), created_at=VALUES(created_at)"
                                 ), {
                                     "checklist_id": sel["id"],
                                     "inspection_id": sel["inspection_id"],
                                     "tank_id": sel["tank_id"],
                                     "job_name": sel["job_name"],
-                                    "sub_job_name": sel["sub_job_description"],
+                                    "sub_job_description": sel["sub_job_description"],
                                     "sn": sel["sn"] or "",
                                     "status_id": sel["status_id"],
                                     "comment": sel["comment"],
@@ -670,6 +738,7 @@ def create_inspection_checklist_bulk(
                                 })
                         except Exception:
                             logger.exception("Failed to sync flagged item into to_do_list")
+
         db.commit()
 
         # Build response in exact requested format (match check_list_response.json)
@@ -712,8 +781,6 @@ def create_inspection_checklist_bulk(
     except Exception as e:
         logger.exception("Error creating inspection checklist bulk")
         return _error(str(e), status_code=500)
-
-
 
 
 @router.delete("/delete/inspection_checklist")
@@ -785,23 +852,25 @@ def update_job_status(
                 # If flagged, sync to to_do_list
                 if status_id == 2:
                     sel = db.execute(text(
-                        "SELECT id, job_name, sub_job_name, sn, status_id, comment, created_at, tank_id, inspection_id FROM inspection_checklist WHERE id = :id"
+                        "SELECT id, job_name, sub_job_description, sn, status_id, comment, created_at, tank_id, inspection_id FROM inspection_checklist WHERE id = :id"
                     ), {"id": item["id"]}).mappings().fetchone()
                     if sel:
                         db.execute(text(
-                            "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_name, sn, status_id, comment, created_at) "
-                            "VALUES (:checklist_id, :inspection_id, :tank_id, :job_name, :sub_job_name, :sn, :status_id, :comment, :created_at)"
+                            "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at) "
+                            "VALUES (:checklist_id, :inspection_id, :tank_id, :job_name, :sub_job_description, :sn, :status_id, :comment, :created_at) "
+                            "ON DUPLICATE KEY UPDATE inspection_id=VALUES(inspection_id), tank_id=VALUES(tank_id), job_name=VALUES(job_name), sub_job_description=VALUES(sub_job_description), sn=VALUES(sn), status_id=VALUES(status_id), comment=VALUES(comment), created_at=VALUES(created_at)"
                         ), {
                             "checklist_id": sel["id"],
                             "inspection_id": sel["inspection_id"],
                             "tank_id": sel["tank_id"],
                             "job_name": sel["job_name"],
-                            "sub_job_name": sel["sub_job_name"],
+                            "sub_job_description": sel["sub_job_description"],
                             "sn": sel["sn"] or "",
                             "status_id": sel["status_id"],
                             "comment": sel["comment"],
                             "created_at": sel["created_at"]
                         })
+
         db.commit()
         return _success(message="Job status updated successfully.")
     except Exception as e:
@@ -830,6 +899,13 @@ def get_checklist_by_inspection_id(
         if not checklist_items:
             return _error(f"No checklist found for inspection_id: {inspection_id}", status_code=404)
 
+        # Build inspection status map for name resolution
+        try:
+            srows = db.execute(text("SELECT status_id, status_name FROM inspection_status")).mappings().fetchall()
+            status_map = {r['status_id']: r['status_name'] for r in (srows or [])}
+        except Exception:
+            status_map = {}
+
         # Group by job_id
         sections = {}
         for item in checklist_items:
@@ -838,7 +914,7 @@ def get_checklist_by_inspection_id(
                 sections[job_id] = {
                     "job_id": job_id,
                     "title": item.get("job_name"),
-                    "status_id": str(item.get("status_id", "")),
+                    "status_name": status_map.get(item.get("status_id")) or str(item.get("status_id", "")),
                     "items": []
                 }
             sections[job_id]["items"].append({

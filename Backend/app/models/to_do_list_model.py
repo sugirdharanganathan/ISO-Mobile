@@ -12,7 +12,7 @@ class ToDoList(Base):
     id = Column(Integer, primary_key=True, index=True)
     checklist_id = Column(Integer, nullable=False, index=True)  # FK to inspection_checklist.id
     inspection_id = Column(Integer, nullable=False, index=True)  # FK to tank_inspection_details.inspection_id
-    tank_number = Column(String(50), nullable=False)
+    tank_id = Column(Integer, nullable=True, index=True)
     job_name = Column(String(255), nullable=True)
     sub_job_description = Column(String(512), nullable=True)
     sn = Column(String(16), nullable=False)
@@ -26,11 +26,11 @@ class ToDoList(Base):
             "id": self.id,
             "checklist_id": self.checklist_id,
             "inspection_id": self.inspection_id,
-            "tank_number": self.tank_number,
+            "tank_id": self.tank_id,
             "job_name": self.job_name,
             "sub_job_description": self.sub_job_description,
             "sn": self.sn,
-            "status": self.status,
+            "status_id": self.status_id,
             "comment": self.comment,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

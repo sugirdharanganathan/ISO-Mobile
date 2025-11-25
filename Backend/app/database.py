@@ -468,12 +468,13 @@ def init_db():
                         `sn` VARCHAR(16) NOT NULL,
                         `sub_job_description` VARCHAR(512),
                         `status_id` INT NOT NULL DEFAULT 1,
-                        `status` VARCHAR(32),
+                        `status_id` INT,
                         `comment` TEXT,
                         `flagged` BOOLEAN NOT NULL DEFAULT FALSE,
                         `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         KEY `idx_inspection_id` (`inspection_id`),
+                        UNIQUE KEY `uq_to_do_list_checklist_id` (`checklist_id`),
                         KEY `idx_tank_id` (`tank_id`),
                         KEY `idx_emp_id` (`emp_id`),
                         CONSTRAINT `fk_checklist_inspection` FOREIGN KEY (`inspection_id`)
@@ -492,15 +493,17 @@ def init_db():
                         `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                         `checklist_id` INT,
                         `inspection_id` INT NOT NULL,
-                        `tank_number` VARCHAR(50),
+                            `tank_id` INT,
                         `job_name` VARCHAR(255),
                         `sub_job_description` VARCHAR(512),
                         `sn` VARCHAR(16),
-                        `status` VARCHAR(32),
+                        `status_id` INT,
                         `comment` TEXT,
                         `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        KEY `idx_inspection_id` (`inspection_id`),
+                            KEY `idx_inspection_id` (`inspection_id`),
+                            KEY `idx_tank_id` (`tank_id`),
+                            CONSTRAINT `fk_todo_tank` FOREIGN KEY (`tank_id`) REFERENCES `tank_details` (`tank_id`) ON DELETE SET NULL,
                         CONSTRAINT `fk_todo_inspection` FOREIGN KEY (`inspection_id`)
                             REFERENCES `tank_inspection_details` (`inspection_id`) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -543,6 +546,7 @@ def init_db():
                         `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         KEY `idx_inspection_id` (`inspection_id`),
+                        UNIQUE KEY `uq_to_do_list_checklist_id` (`checklist_id`),
                         KEY `idx_image_id` (`image_id`),
                         KEY `idx_tank_number` (`tank_number`),
                         CONSTRAINT `fk_tank_images_inspection` FOREIGN KEY (`inspection_id`)
@@ -968,7 +972,7 @@ def init_db():
                         `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                         `checklist_id` INT,
                         `inspection_id` INT NOT NULL,
-                        `tank_number` VARCHAR(50),
+                            `tank_id` INT,
                         `job_name` VARCHAR(255),
                         `sub_job_description` VARCHAR(512),
                         `sn` VARCHAR(16),
@@ -976,7 +980,9 @@ def init_db():
                         `comment` TEXT,
                         `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        KEY `idx_inspection_id` (`inspection_id`)
+                            KEY `idx_inspection_id` (`inspection_id`),
+                            KEY `idx_tank_id` (`tank_id`),
+                            CONSTRAINT `fk_todo_tank` FOREIGN KEY (`tank_id`) REFERENCES `tank_details` (`tank_id`) ON DELETE SET NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                 """)
                 conn2.commit()
@@ -1140,7 +1146,7 @@ def init_db():
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS `safety_valve_size` (
                         `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                        `size_name` VARCHAR(100) NOT NULL,
+                        `size_label` VARCHAR(100) NOT NULL,
                         `description` TEXT,
                         `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -1148,6 +1154,52 @@ def init_db():
                 """)
                 conn2.commit()
                 logger.info("Created safety_valve_size table.")
+                # --- Seed some default values for safety valve masters if empty ---
+                # Use cursor/conn2 for seeding to ensure changes are committed via conn2
+                try:
+                    cursor.execute("SELECT COUNT(1) as cnt FROM safety_valve_brand")
+                    r = cursor.fetchone() or {"cnt": 0}
+                    cnt = int(r.get("cnt", 0) if isinstance(r, dict) else (r[0] if r else 0))
+                    if cnt == 0:
+                        safety_valve_brand_data = [
+                            ('Generic Brand', 'Generic safety valves'),
+                            ('Fisher', 'Fisher safety valves'),
+                            ('TESCOM', 'TESCOM safety valves'),
+                            ('Bonomi', 'Bonomi safety valves'),
+                            ('Other', 'Other brands')
+                        ]
+                        for brand_name, description in safety_valve_brand_data:
+                            cursor.execute("INSERT INTO safety_valve_brand (brand_name, description) VALUES (%s, %s)", (brand_name, description))
+                        conn2.commit()
+                except Exception:
+                    try:
+                        conn2.rollback()
+                    except Exception:
+                        pass
+                # NOTE: We intentionally DO NOT seed any rows into safety_valve_model to allow
+                # the table to be empty on startup per user request. If the table is populated
+                # from a previous run, we will clear it here so that it becomes empty.
+                try:
+                    cursor.execute("DELETE FROM safety_valve_model")
+                    conn2.commit()
+                    logger.info("Cleared safety_valve_model table — it is now empty.")
+                except Exception:
+                    try:
+                        conn2.rollback()
+                    except Exception:
+                        pass
+                # NOTE: We intentionally DO NOT seed any rows into safety_valve_size to allow
+                # the table to be empty on startup per user request. If the table is populated
+                # from a previous run, we will clear it here so that it becomes empty.
+                try:
+                    cursor.execute("DELETE FROM safety_valve_size")
+                    conn2.commit()
+                    logger.info("Cleared safety_valve_size table — it is now empty.")
+                except Exception:
+                    try:
+                        conn2.rollback()
+                    except Exception:
+                        pass
             except Exception:
                 logger.warning("Warning: Could not create safety_valve_size table")
                 logger.debug(traceback.format_exc())
