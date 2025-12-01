@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
 from fastapi import Request
@@ -12,9 +14,11 @@ import logging
 
 # import your routers and db init
 from app.routers import tank_image_router, tank_inspection_router, auth_router
+from app.routers import validation_router
 from app.routers.tank_checkpoints_router import router as tank_checkpoints_router
 from app.routers import to_do_list_router
 from app.database import init_db
+from app.routers import tank_checklist_router
 
 
 # Initialize database
@@ -38,6 +42,9 @@ app.include_router(tank_checkpoints_router)
 app.include_router(auth_router.router)
 app.include_router(tank_inspection_router.router)
 app.include_router(to_do_list_router.router)
+#app.include_router(checklist_router.router)
+app.include_router(tank_checklist_router.router)
+app.include_router(validation_router.router)
 
 # Serve uploaded images statically so frontend can fetch them
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
@@ -104,6 +111,19 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 async def generic_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception: %s", exc)
     return JSONResponse(content={"success": False, "message": "Internal server error", "data": {}}, status_code=500)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Ensure the validation errors from FastAPI are returned in the uniform JSON format
+    try:
+        # Build a simple readable message and include details inside data
+        errors = jsonable_encoder(exc.errors())
+        msg = "Request validation error"
+    except Exception:
+        errors = None
+        msg = "Request validation error"
+    return JSONResponse(content={"success": False, "message": msg, "data": {"errors": errors or {}}}, status_code=422)
 
 
 @app.get("/")

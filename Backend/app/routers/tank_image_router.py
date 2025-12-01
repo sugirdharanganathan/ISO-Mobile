@@ -4,7 +4,7 @@ import uuid
 from datetime import date, datetime
 from typing import Optional, Dict, List, Any, Union
 import jwt  # PyJWT
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, status, Header
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, status, Header, Request
 from pymysql.cursors import DictCursor
 
 from app.database import get_db_connection
@@ -30,13 +30,14 @@ SWAGGER_IMAGE_PATH = "/mnt/data/95ba5c43-1b45-4c95-b5bf-691349db8047.png"
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
 # ------------------------------------------------------------------
-# Default image types (Updated to match DB: Underside ID=4)
+# Default image types (Updated to 15 types; underside split into two)
 # ------------------------------------------------------------------
 IMAGE_TYPES = {
     "frontview": {"image_type_id": 1, "image_type": "Front View", "description": "General tank photos"},
     "rearview": {"image_type_id": 2, "image_type": "Rear View", "description": "Photos from rear side"},
     "topview": {"image_type_id": 3, "image_type": "Top View", "description": "Photos from top"},
-    "undersideview": {"image_type_id": 4, "image_type": "Underside View", "description": "Photos of underside"},
+    # undersides now two separate types (undersideview01 = id 4, undersideview02 = id 15)
+    "undersideview01": {"image_type_id": 4, "image_type": "Underside View 01", "description": "Underside photo #1"},
     "frontlhview": {"image_type_id": 5, "image_type": "Front LH View", "description": "Left-hand front view"},
     "rearlhview": {"image_type_id": 6, "image_type": "Rear LH View", "description": "Left-hand rear view"},
     "frontrhview": {"image_type_id": 7, "image_type": "Front RH View", "description": "Right-hand front view"},
@@ -47,6 +48,8 @@ IMAGE_TYPES = {
     "safetyvalve": {"image_type_id": 12, "image_type": "Safety Valve", "description": "Safety valve photos"},
     "levelpressuregauge": {"image_type_id": 13, "image_type": "Level / Pressure Gauge", "description": "Photos showing gauge readings"},
     "vacuumreading": {"image_type_id": 14, "image_type": "Vacuum Reading", "description": "Vacuum reading photos"},
+    # new 15th type for second underside image
+    "undersideview02": {"image_type_id": 15, "image_type": "Underside View 02", "description": "Underside photo #2"},
 }
 
 # ------------------------------------------------------------------
@@ -91,6 +94,13 @@ def _sanitize_slug(raw: str) -> str:
 # Helpers
 # ------------------------------------------------------------------
 def save_uploaded_file(file: UploadFile, tank_number: str, image_type_id: Optional[int], index: Optional[int] = None, slug_override: Optional[str] = None) -> dict:
+    """
+    Save the uploaded file into:
+      uploads/tank_images_mobile/{tank_number}/originals/{filename}
+    Create thumbnails in:
+      uploads/tank_images_mobile/{tank_number}/thumbnails/{thumb_filename}
+    Return a dict with image_path (pointing to originals) and thumbnail_path (pointing to thumbnails).
+    """
     resolved_slug = None
     try:
         if image_type_id is not None:
@@ -121,18 +131,21 @@ def save_uploaded_file(file: UploadFile, tank_number: str, image_type_id: Option
         resolved_slug = slug_override
 
     file_extension = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
-    # if index provided, append an ordinal suffix to the slug (underside_view01, underside_view02)
+    # if index provided, append an ordinal suffix to the slug (undersideview01, undersideview02)
     if index is not None:
-        # Ensure two-digit numbering
         resolved_slug_with_index = f"{resolved_slug}{index:02d}"
         unique_filename = f"{tank_number}_{resolved_slug_with_index}_{uuid.uuid4().hex}{file_extension}"
     else:
         unique_filename = f"{tank_number}_{resolved_slug}_{uuid.uuid4().hex}{file_extension}"
 
+    # Create directories: tank folder, originals and thumbnails
     tank_dir_fs = os.path.join(IMAGES_ROOT_DIR, tank_number)
-    os.makedirs(tank_dir_fs, exist_ok=True)
+    originals_dir = os.path.join(tank_dir_fs, "originals")
+    thumbnails_dir = os.path.join(tank_dir_fs, "thumbnails")
+    os.makedirs(originals_dir, exist_ok=True)
+    os.makedirs(thumbnails_dir, exist_ok=True)
 
-    file_path_fs = os.path.join(tank_dir_fs, unique_filename)
+    file_path_fs = os.path.join(originals_dir, unique_filename)
     total = 0
     chunk_size = 64 * 1024
     try:
@@ -157,43 +170,66 @@ def save_uploaded_file(file: UploadFile, tank_number: str, image_type_id: Option
             pass
 
     result = {
-        "image_path": f"{tank_number}/{unique_filename}",
+        # image_path points to originals subfolder
+        "image_path": f"{tank_number}/originals/{unique_filename}",
         "thumbnail_path": None,
         "size": total,
         "resolved_image_type_slug": resolved_slug if index is None else resolved_slug_with_index,
         "image_type_id": image_type_id
     }
 
+    # Generate thumbnail into thumbnails_dir
     if Image is not None:
         try:
-            # Use indexed slug for thumbnail naming when present
             thumb_slug = result.get("resolved_image_type_slug")
             thumb_name = f"{tank_number}_{thumb_slug}_{uuid.uuid4().hex}_thumb.jpg"
-            thumb_path_fs = os.path.join(tank_dir_fs, thumb_name)
+            thumb_path_fs = os.path.join(thumbnails_dir, thumb_name)
             with Image.open(file_path_fs) as img:
                 img.thumbnail(THUMBNAIL_SIZE)
                 img.convert("RGB").save(thumb_path_fs, format="JPEG")
-            result["thumbnail_path"] = f"{tank_number}/{thumb_name}"
+            result["thumbnail_path"] = f"{tank_number}/thumbnails/{thumb_name}"
         except Exception as e:
             print(f"Warning: thumbnail generation failed for {file_path_fs}: {e}")
 
     return result
 
 def delete_file(file_path: str):
+    """
+    Delete a saved file. Also attempt to delete matching thumbnails.
+    Accepts file_path like 'TANKNUM/originals/filename.jpg' or 'TANKNUM/thumbnails/thumb.jpg'.
+    """
     try:
         full_path = os.path.join(IMAGES_ROOT_DIR, *file_path.split("/"))
         if os.path.exists(full_path):
             os.remove(full_path)
+        # Attempt to remove linked thumbnails/originals
         try:
-            folder = os.path.dirname(full_path)
-            base = os.path.splitext(os.path.basename(full_path))[0]
-            if os.path.isdir(folder):
-                for fn in os.listdir(folder):
-                    if 'thumb' in fn and base in fn:
-                        try:
-                            os.remove(os.path.join(folder, fn))
-                        except Exception:
-                            pass
+            # If we deleted an original, try to delete any matching thumbs in thumbnails folder.
+            # If we deleted a thumbnail, that's already removed.
+            parts = file_path.split("/")
+            if len(parts) >= 3:
+                tank_number = parts[0]
+                # base name without extension (original filename's base)
+                base = os.path.splitext(parts[-1])[0]
+                # path to thumbnails folder
+                thumbs_folder = os.path.join(IMAGES_ROOT_DIR, tank_number, "thumbnails")
+                if os.path.isdir(thumbs_folder):
+                    for fn in os.listdir(thumbs_folder):
+                        # remove any thumb file that contains the base slug
+                        if base in fn:
+                            try:
+                                os.remove(os.path.join(thumbs_folder, fn))
+                            except Exception:
+                                pass
+                # also attempt to remove originals that match if a thumbnail was removed
+                originals_folder = os.path.join(IMAGES_ROOT_DIR, tank_number, "originals")
+                if os.path.isdir(originals_folder):
+                    for fn in os.listdir(originals_folder):
+                        if base in fn:
+                            try:
+                                os.remove(os.path.join(originals_folder, fn))
+                            except Exception:
+                                pass
         except Exception:
             pass
     except Exception as e:
@@ -264,35 +300,36 @@ def get_image_types():
 # POST /api/upload/batch/{tank_number}
 # ------------------------------------------------------------------
 # Make sure to import Union at the top
-from typing import Optional, List, Union
-
 @router.post("/batch/{inspection_id}", status_code=status.HTTP_201_CREATED)
 async def batch_upload_images(
+    request: Request,
     inspection_id: int,
     
     # Single file uploads
-    frontview: Optional[UploadFile] = File(None),
-    rearview: Optional[UploadFile] = File(None),
-    topview: Optional[UploadFile] = File(None),
+    frontview: Optional[Union[UploadFile, str]] = File(None),
+    rearview: Optional[Union[UploadFile, str]] = File(None),
+    topview: Optional[Union[UploadFile, str]] = File(None),
     
-    # Multiple file uploads for underside view
-    undersideview: Optional[List[UploadFile]] = File(None), 
+    # Two separate underside files now (field names requested):
+    undersideview01: Optional[Union[UploadFile, str]] = File(None),
+    undersideview02: Optional[Union[UploadFile, str]] = File(None),
     
-    frontlhview: Optional[UploadFile] = File(None),
-    rearlhview: Optional[UploadFile] = File(None),
-    frontrhview: Optional[UploadFile] = File(None),
-    rearrhview: Optional[UploadFile] = File(None),
-    lhsideview: Optional[UploadFile] = File(None),
-    rhsideview: Optional[UploadFile] = File(None),
-    valvessectionview: Optional[UploadFile] = File(None),
-    safetyvalve: Optional[UploadFile] = File(None),
-    levelpressuregauge: Optional[UploadFile] = File(None),
-    vacuumreading: Optional[UploadFile] = File(None),
+    frontlhview: Optional[Union[UploadFile, str]] = File(None),
+    rearlhview: Optional[Union[UploadFile, str]] = File(None),
+    frontrhview: Optional[Union[UploadFile, str]] = File(None),
+    rearrhview: Optional[Union[UploadFile, str]] = File(None),
+    lhsideview: Optional[Union[UploadFile, str]] = File(None),
+    rhsideview: Optional[Union[UploadFile, str]] = File(None),
+    valvessectionview: Optional[Union[UploadFile, str]] = File(None),
+    safetyvalve: Optional[Union[UploadFile, str]] = File(None),
+    levelpressuregauge: Optional[Union[UploadFile, str]] = File(None),
+    vacuumreading: Optional[Union[UploadFile, str]] = File(None),
     Authorization: Optional[str] = Header(None),
 ):
     """
     Batch upload with DYNAMIC LIMITS.
-    Accepts file uploads for all image types. For undersideview, you MUST upload exactly 2 files.
+    Accepts file uploads for all image types. Underside images are now uploaded as two separate fields:
+    undersideview01 and undersideview02 (single file each).
     """
 
     # --- SANITIZATION: Clean up None/empty values ---
@@ -300,7 +337,8 @@ async def batch_upload_images(
         """Remove None or empty values."""
         if val is None:
             return None
-        if isinstance(val, str):  # Fallback: if somehow a string is sent, ignore it
+        # If a string was passed instead of an UploadFile (swagger quirk), drop it
+        if isinstance(val, str):
             return None
         return val
 
@@ -308,6 +346,8 @@ async def batch_upload_images(
     frontview = clean_input(frontview)
     rearview = clean_input(rearview)
     topview = clean_input(topview)
+    undersideview01 = clean_input(undersideview01)
+    undersideview02 = clean_input(undersideview02)
     frontlhview = clean_input(frontlhview)
     rearlhview = clean_input(rearlhview)
     frontrhview = clean_input(frontrhview)
@@ -319,20 +359,30 @@ async def batch_upload_images(
     levelpressuregauge = clean_input(levelpressuregauge)
     vacuumreading = clean_input(vacuumreading)
 
-    # Clean List (Underside View) - keep only valid UploadFile objects
-    if undersideview:
-        undersideview = [f for f in undersideview if isinstance(f, UploadFile) and f is not None]
-        if not undersideview:
-            undersideview = None
+    # If either underside field is missing, attempt to pick up from raw form (robustness for Swagger quirks)
+    # This tries to extract file parts named 'undersideview01' or 'undersideview02' from the raw form if binding failed.
+    if undersideview01 is None or undersideview02 is None:
+        try:
+            form = await request.form()
+            # form.get returns last value; use get if available
+            if undersideview01 is None:
+                v = form.get("undersideview01") if hasattr(form, "get") else None
+                if isinstance(v, UploadFile):
+                    undersideview01 = v
+            if undersideview02 is None:
+                v2 = form.get("undersideview02") if hasattr(form, "get") else None
+                if isinstance(v2, UploadFile):
+                    undersideview02 = v2
+        except Exception:
+            pass
 
-    # ENFORCE: undersideview must be exactly 2 images (if provided)
-    if undersideview is not None:
-        if len(undersideview) != 2:
-            raise HTTPException(
-                status_code=400,
-                detail="undersideview requires exactly 2 image files (provide 2 files)."
-            )
-    # ----------------------------------------------------------
+    # Validate underside files if present: both optional individually, but when saved they will become undersideview01/02
+    if undersideview01:
+        if not getattr(undersideview01, "content_type", "").startswith("image/"):
+            raise HTTPException(status_code=400, detail="undersideview01 must be an image (image/*).")
+    if undersideview02:
+        if not getattr(undersideview02, "content_type", "").startswith("image/"):
+            raise HTTPException(status_code=400, detail="undersideview02 must be an image (image/*).")
 
     # 1. Fetch Dynamic Counts
     count_limits = {}
@@ -351,7 +401,8 @@ async def batch_upload_images(
         "frontview": frontview,
         "rearview": rearview,
         "topview": topview,
-        "undersideview": undersideview,
+        "undersideview01": undersideview01,
+        "undersideview02": undersideview02,
         "frontlhview": frontlhview,
         "rearlhview": rearlhview,
         "frontrhview": frontrhview,
@@ -368,22 +419,19 @@ async def batch_upload_images(
     files_to_process = {}
     for key, value in uploaded_files_map.items():
         if value:
-            # value is File or List[File]
-            file_list = value if isinstance(value, list) else [value]
-            
+            # value is a single UploadFile (or File-like) — convert to list for uniform handling
+            file_list = [value]
+
             type_info = IMAGE_TYPES.get(key)
             if not type_info:
+                # unknown image type slug — skip silently
                 continue
             type_id = type_info["image_type_id"]
             db_limit = count_limits.get(type_id, 1)
 
-            # SPECIAL RULE: undersideview MUST be exactly 2 files and we accept exactly those two.
-            if key == "undersideview":
-                # We already enforced len == 2 above.
-                final_list = file_list[:2]
-            else:
-                # For other types, respect DB limit (default 1)
-                final_list = file_list[:db_limit]
+            # For the new undersideview01/02 fields we want to save each as its respective index under base slug 'undersideview'
+            # But enforce DB limit if it's less than 1 (rare)
+            final_list = file_list[:db_limit]
 
             if len(final_list) > 0:
                 files_to_process[key] = final_list
@@ -403,7 +451,7 @@ async def batch_upload_images(
     finally:
         conn.close()
 
-    validate_tank(tank_number)
+    #validate_tank(tank_number)
 
     # 4. Auth
     token_sub = _get_user_id_from_auth_header(Authorization)
@@ -444,38 +492,57 @@ async def batch_upload_images(
                 for idx, file_obj in enumerate(file_list, start=1):
                     # Final safety check
                     if not hasattr(file_obj, 'content_type') or not file_obj.content_type.startswith('image/'):
+                        # skip non-image parts
                         continue
 
-                    # prepare slug override and sequence for save_uploaded_file
+                    # For underside fields we want to save both under the same base slug 'undersideview'
                     slug_override = None
                     seq_index = None
+                    if slug_key.startswith("undersideview"):
+                        # determine 01 vs 02 suffix from key
+                        if slug_key.endswith("01"):
+                            slug_override = "undersideview"
+                            seq_index = 1
+                        elif slug_key.endswith("02"):
+                            slug_override = "undersideview"
+                            seq_index = 2
+                        else:
+                            # fallback: if key is undersideviewXX, try to parse digits
+                            try:
+                                parts = slug_key.replace("undersideview", "")
+                                num = int(parts)
+                                slug_override = "undersideview"
+                                seq_index = num
+                            except Exception:
+                                slug_override = None
+                                seq_index = None
 
-                    if slug_key == "undersideview":
-                        # use explicit slug 'undersideview' so rows store that slug and are visible
-                        slug_override = "undersideview"
-                        seq_index = idx  # 1 or 2 -> results in undersideview1/undersideview2 filenames in save_uploaded_file
-                    else:
-                        # keep previous behaviour for other types (if you want custom slugs for others, adjust here)
-                        base_slug = type_info.get("image_type", slug_key)
-                        base_slug = _sanitize_slug(base_slug)
-                        slug_override = base_slug
+                    # ... (inside your loop) ...
 
                     saved_info = save_uploaded_file(file_obj, tank_number, image_type_id, index=seq_index, slug_override=slug_override)
                     saved_file_paths.append(saved_info["image_path"]) 
+                    final_slug = saved_info.get("resolved_image_type_slug") or slug_key
 
-                    # Make sure the inserted image_type/slug is explicit and visible.
-                    if slug_key == "undersideview":
-                        final_slug = "undersideview"
-                    else:
-                        # prefer a resolved slug returned by save_uploaded_file if present, else use the configured base slug
-                        final_slug = saved_info.get("resolved_image_type_slug") or slug_override or slug_key
-
+                    # --- REPLACE WITH THIS FIXED QUERY ---
                     cursor.execute("""
-                        INSERT INTO tank_images (emp_id, inspection_id, image_id, tank_number, image_type, image_path, created_at, created_date)
-                        VALUES (%s, %s, %s, %s, %s, %s, NOW(), CURDATE())
-                    """, (emp_to_use, derived_insp_id, image_type_id, tank_number, type_info.get("image_type"), saved_info["image_path"]))
-                    
-                    successful_inserts.append({"image_type": type_info["image_type"], "filename": saved_info["image_path"], "stored_slug": saved_info.get("resolved_image_type_slug")})
+                        INSERT INTO tank_images 
+                        (emp_id, inspection_id, image_id, tank_number, image_type, image_path, thumbnail_path, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    """, (
+                        emp_to_use, 
+                        derived_insp_id, 
+                        image_type_id, 
+                        tank_number, 
+                        final_slug, 
+                        saved_info["image_path"],
+                        saved_info.get("thumbnail_path")  # <--- This is the important addition!
+                    ))
+                    # -------------------------------------
+
+                    successful_inserts.append({
+                        "image_type_id": image_type_id,
+                        "filename": saved_info["image_path"]
+                    })
 
         conn.commit()
         return {"success": True, "message": f"Uploaded {len(successful_inserts)} images.", "data": successful_inserts}
@@ -490,50 +557,87 @@ async def batch_upload_images(
 
 
 # ------------------------------------------------------------------
-# ENDPOINT: Get images by inspection (GET) - unchanged (no auth)
+# ENDPOINT: Get images by inspection (GET) - modified output format
 # ------------------------------------------------------------------
 @router.get("/images/inspection/{inspection_id}")
 def get_images_by_inspection(inspection_id: int):
+    """
+    Returns:
+    {
+      "success": True,
+      "data": {
+         "inspection_id": "<inspection_id>",
+         "tank_id": "<tank_id>",
+         "emp_id": "<emp_id>",
+         "images": [ ... image objects ... ]
+      }
+    }
+    Each image object contains image_type_id (from image_id) and tank_id (same tank_id as above).
+    """
     try:
         conn = get_db_connection()
         try:
             with conn.cursor(DictCursor) as cursor:
                 cursor.execute("SELECT * FROM tank_images WHERE inspection_id = %s ORDER BY created_at ASC", (inspection_id,))
                 rows = cursor.fetchall() or []
+
+                # derive inspection-level tank_id and emp_id from tank_inspection_details
+                cursor.execute("SELECT tank_id, tank_number, emp_id, operator_id FROM tank_inspection_details WHERE inspection_id=%s LIMIT 1", (inspection_id,))
+                insp_row = cursor.fetchone() or {}
         finally:
             conn.close()
 
-        if not rows:
-            return {"success": True, "data": [], "message": f"No images found for inspection_id {inspection_id}"}
+        # derive tank_id and emp_id for top-level output
+        tank_id = insp_row.get("tank_id") if insp_row.get("tank_id") is not None else ""
+        # prefer emp_id from inspection row if set else operator_id else first image emp_id
+        emp_id = insp_row.get("emp_id") if insp_row.get("emp_id") is not None else insp_row.get("operator_id")
 
+        # build images list
         enriched_rows = []
         for row in rows:
             thumb = None
             try:
-                base = row.get("image_path")
+                base = row.get("image_path")  # now value like "TANKNUM/originals/filename.jpg"
                 if base:
-                        folder = os.path.dirname(base)
-                        name = os.path.splitext(os.path.basename(base))[0]
-                        folder_abs = os.path.join(IMAGES_ROOT_DIR, folder)
-                        if not os.path.isdir(folder_abs):
-                            # Fallback to previous uploads location for backward compatibility
-                            folder_abs_old = os.path.join(UPLOAD_DIR, folder)
-                            if os.path.isdir(folder_abs_old):
-                                folder_abs = folder_abs_old
-                        if os.path.isdir(folder_abs):
+                    # find thumbnails under tank_number/thumbnails
+                    parts = base.split("/")
+                    if len(parts) >= 3:
+                        tank_number = parts[0]
+                        name = os.path.splitext(os.path.basename(base))[0]  # e.g. "TANKNUM_slug_uuid"
+                        thumbnails_abs = os.path.join(IMAGES_ROOT_DIR, tank_number, "thumbnails")
+                        if os.path.isdir(thumbnails_abs):
                             prefix = "_".join(name.split('_')[:2]) + "_"
-                            for fn in os.listdir(folder_abs):
+                            for fn in os.listdir(thumbnails_abs):
                                 if fn.startswith(prefix) and fn.endswith('_thumb.jpg'):
-                                    thumb = f"{folder}/{fn}"
+                                    thumb = f"{tank_number}/thumbnails/{fn}"
                                     break
             except Exception:
                 thumb = None
 
-            row_with_thumb = dict(row)
-            row_with_thumb["thumbnail_path"] = thumb
-            enriched_rows.append(row_with_thumb)
+            # Build image object: replace image_type and tank_number with image_type_id and tank_id
+            image_obj = dict(row)
+            # remove/replace keys as requested
+            image_obj["image_type_id"] = image_obj.get("image_id")
+            # use tank_id derived from inspection row (consistent for this inspection)
+            image_obj["tank_id"] = tank_id if tank_id != "" else image_obj.get("tank_number", "")
+            # remove old fields if present
+            if "image_type" in image_obj:
+                image_obj.pop("image_type", None)
+            if "tank_number" in image_obj:
+                image_obj.pop("tank_number", None)
 
-        return {"success": True, "data": enriched_rows}
+            image_obj["thumbnail_path"] = thumb
+            enriched_rows.append(image_obj)
+
+        # Prepare response data object with inspection_id, tank_id, emp_id outside images list
+        resp_data = {
+            "inspection_id": str(inspection_id),
+            "tank_id": str(tank_id) if tank_id != "" else "",
+            "emp_id": str(emp_id) if emp_id is not None else "",
+            "images": enriched_rows
+        }
+
+        return {"success": True, "data": resp_data}
     except HTTPException:
         raise
     except Exception as e:
@@ -543,112 +647,238 @@ def get_images_by_inspection(inspection_id: int):
 # ENDPOINT: Replace image by id (PUT) - requires Authorization header
 # ------------------------------------------------------------------
 
-@router.put("/images/{id}")
-async def replace_image_by_id(id: int, file: UploadFile = File(...), Authorization: Optional[str] = Header(None)):
-    try:
-        if not file.content_type or not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="File must be an image")
+@router.put("/images/inspection/{inspection_id}")
+async def replace_images_by_inspection_id(
+    request: Request,
+    inspection_id: int,
+    frontview: Optional[Union[UploadFile, str]] = File(None),
+    rearview: Optional[Union[UploadFile, str]] = File(None),
+    topview: Optional[Union[UploadFile, str]] = File(None),
+    undersideview01: Optional[Union[UploadFile, str]] = File(None),
+    undersideview02: Optional[Union[UploadFile, str]] = File(None),
+    frontlhview: Optional[Union[UploadFile, str]] = File(None),
+    rearlhview: Optional[Union[UploadFile, str]] = File(None),
+    frontrhview: Optional[Union[UploadFile, str]] = File(None),
+    rearrhview: Optional[Union[UploadFile, str]] = File(None),
+    lhsideview: Optional[Union[UploadFile, str]] = File(None),
+    rhsideview: Optional[Union[UploadFile, str]] = File(None),
+    valvessectionview: Optional[Union[UploadFile, str]] = File(None),
+    safetyvalve: Optional[Union[UploadFile, str]] = File(None),
+    levelpressuregauge: Optional[Union[UploadFile, str]] = File(None),
+    vacuumreading: Optional[Union[UploadFile, str]] = File(None),
+    Authorization: Optional[str] = Header(None),
+):
+    """
+    Replace images for the provided image types for a given inspection_id (partial update).
+    This will only delete existing images for the image types included in the request and insert the newly provided files.
+    """
+    # --- SANITIZATION: Clean up None/empty values ---
+    def clean_input(val):
+        if val is None: return None
+        if isinstance(val, str): return None
+        return val
 
-        # 1) fetch existing row
-        conn = get_db_connection()
+    frontview = clean_input(frontview)
+    rearview = clean_input(rearview)
+    topview = clean_input(topview)
+    undersideview01 = clean_input(undersideview01)
+    undersideview02 = clean_input(undersideview02)
+    frontlhview = clean_input(frontlhview)
+    rearlhview = clean_input(rearlhview)
+    frontrhview = clean_input(frontrhview)
+    rearrhview = clean_input(rearrhview)
+    lhsideview = clean_input(lhsideview)
+    rhsideview = clean_input(rhsideview)
+    valvessectionview = clean_input(valvessectionview)
+    safetyvalve = clean_input(safetyvalve)
+    levelpressuregauge = clean_input(levelpressuregauge)
+    vacuumreading = clean_input(vacuumreading)
+
+    # Swagger quirk handling for underside views
+    if undersideview01 is None or undersideview02 is None:
         try:
-            with conn.cursor(DictCursor) as cursor:
-                cursor.execute("SELECT * FROM tank_images WHERE id = %s", (id,))
-                existing = cursor.fetchone()
-                if not existing:
-                    raise HTTPException(status_code=404, detail="Image id not found")
+            form = await request.form()
+            if undersideview01 is None:
+                v = form.get("undersideview01") if hasattr(form, "get") else None
+                if isinstance(v, UploadFile): undersideview01 = v
+            if undersideview02 is None:
+                v2 = form.get("undersideview02") if hasattr(form, "get") else None
+                if isinstance(v2, UploadFile): undersideview02 = v2
+        except Exception:
+            pass
 
-                tank_number = existing.get("tank_number")
-                if not tank_number:
-                    raise HTTPException(status_code=400, detail="Existing image row missing tank_number")
+    # Validate content types
+    for f in [undersideview01, undersideview02]:
+        if f and not getattr(f, "content_type", "").startswith("image/"):
+            raise HTTPException(status_code=400, detail="Underside views must be images.")
 
-                image_type = existing.get("image_type") or "image"
-        finally:
-            conn.close()
+    # 1. Fetch Dynamic Counts
+    count_limits = {}
+    conn = get_db_connection()
+    try:
+        with conn.cursor(DictCursor) as cursor:
+            cursor.execute("SELECT id, count FROM image_type")
+            for r in cursor.fetchall():
+                count_limits[r['id']] = r.get('count', 1)
+    finally:
+        conn.close()
 
-        # 2) Save new file
-        saved_info = save_uploaded_file(file, tank_number, image_type)
-        new_path = saved_info["image_path"]
+    # 2. Map Inputs
+    uploaded_files_map = {
+        "frontview": frontview,
+        "rearview": rearview,
+        "topview": topview,
+        "undersideview01": undersideview01,
+        "undersideview02": undersideview02,
+        "frontlhview": frontlhview,
+        "rearlhview": rearlhview,
+        "frontrhview": frontrhview,
+        "rearrhview": rearrhview,
+        "lhsideview": lhsideview,
+        "rhsideview": rhsideview,
+        "valvessectionview": valvessectionview,
+        "safetyvalve": safetyvalve,
+        "levelpressuregauge": levelpressuregauge,
+        "vacuumreading": vacuumreading,
+    }
 
-        # 3) Resolve authenticated user's emp_id
-        token_sub = _get_user_id_from_auth_header(Authorization)
-        if token_sub is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authorization required")
+    # 3. Process Logic
+    files_to_process = {}
+    for key, value in uploaded_files_map.items():
+        if value:
+            file_list = [value]
+            type_info = IMAGE_TYPES.get(key)
+            if not type_info: continue
+            
+            type_id = type_info["image_type_id"]
+            db_limit = count_limits.get(type_id, 1)
+            final_list = file_list[:db_limit]
+            
+            if len(final_list) > 0:
+                files_to_process[key] = final_list
 
-        authenticated_emp_id = None
+    if not files_to_process:
+        raise HTTPException(status_code=400, detail="No valid files provided to replace images.")
+
+    # Resolve tank_number
+    conn = get_db_connection()
+    try:
+        with conn.cursor(DictCursor) as cursor:
+            cursor.execute("SELECT tank_number FROM tank_inspection_details WHERE inspection_id=%s LIMIT 1", (inspection_id,))
+            rr = cursor.fetchone()
+            if not rr or not rr.get("tank_number"):
+                raise HTTPException(status_code=404, detail="Inspection not found or missing tank_number")
+            tank_number = rr.get("tank_number")
+    finally:
+        conn.close()
+
+    # 4. Auth
+    token_sub = _get_user_id_from_auth_header(Authorization)
+    authenticated_emp_id = None
+    if token_sub:
         conn = get_db_connection()
         try:
             with conn.cursor(DictCursor) as cursor:
                 cursor.execute("SELECT emp_id FROM users WHERE id = %s LIMIT 1", (token_sub,))
                 urow = cursor.fetchone()
-                if not urow or urow.get("emp_id") is None:
-                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authenticated user not found")
-                try:
+                if urow and urow.get("emp_id"):
                     authenticated_emp_id = int(urow.get("emp_id"))
-                except Exception:
-                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid emp_id for user")
         finally:
             conn.close()
 
-        # 4) derive latest inspection_id for this tank
-        conn = get_db_connection()
-        try:
-            with conn.cursor(DictCursor) as cursor:
-                derived_insp_id = _derive_latest_inspection_id(cursor, tank_number)
-        finally:
-            conn.close()
+    saved_file_paths = []
+    successful_inserts = []
 
-        # 5) Update DB row
-        conn = get_db_connection()
-        try:
-            with conn.cursor(DictCursor) as cursor:
-                try:
-                    cursor.execute(
-                        "UPDATE tank_images SET image_path=%s, emp_id=%s, inspection_id=%s, updated_at=NOW() WHERE id=%s",
-                        (new_path, authenticated_emp_id, derived_insp_id, id)
-                    )
-                    conn.commit()
-                except Exception:
-                    delete_file(new_path)
-                    raise
+    # 5. Database Transaction (Delete Old -> Insert New)
+    conn = get_db_connection()
+    try:
+        conn.begin()
+        with conn.cursor(DictCursor) as cursor:
+            # Determine emp_id
+            if authenticated_emp_id:
+                emp_to_use = authenticated_emp_id
+            else:
+                cursor.execute("SELECT operator_id FROM tank_inspection_details WHERE inspection_id=%s LIMIT 1", (inspection_id,))
+                op = cursor.fetchone()
+                emp_to_use = op.get("operator_id") if op else None
 
-                old_path = existing.get("image_path")
-                if old_path:
-                    delete_file(old_path)
+            # --- DELETE OLD IMAGES (only for provided image types) ---
+            # Build list of image_type IDs we're about to replace (partial update)
+            image_type_ids_to_replace = [IMAGE_TYPES[k]["image_type_id"] for k in files_to_process.keys() if k in IMAGE_TYPES]
+            old_rows = []
+            if image_type_ids_to_replace:
+                placeholders = ",".join(["%s"] * len(image_type_ids_to_replace))
+                # fetch old rows for only these image types
+                cursor.execute(f"SELECT id, image_id, image_path, thumbnail_path FROM tank_images WHERE inspection_id = %s AND image_id IN ({placeholders})", (inspection_id, *image_type_ids_to_replace))
+                old_rows = cursor.fetchall() or []
+                # delete only those image rows
+                cursor.execute(f"DELETE FROM tank_images WHERE inspection_id = %s AND image_id IN ({placeholders})", (inspection_id, *image_type_ids_to_replace))
+            
+            # Cleanup old files from disk (only for replaced types)
+            for row in old_rows:
+                if row.get("image_path"): delete_file(row["image_path"])
+                if row.get("thumbnail_path"): delete_file(row["thumbnail_path"])
 
-                cursor.execute(
-                    """
-                    SELECT id, emp_id, inspection_id, image_id, tank_number, image_type, image_path, created_at, updated_at, created_date
-                    FROM tank_images WHERE id = %s
-                    """,
-                    (id,)
-                )
-                image_row = cursor.fetchone()
-        finally:
-            conn.close()
+            # --- INSERT NEW IMAGES ---
+            for slug_key, file_list in files_to_process.items():
+                type_info = IMAGE_TYPES.get(slug_key)
+                image_type_id = type_info["image_type_id"]
 
-        filename = new_path.split('/', 1)[1] if '/' in new_path else file.filename
+                for idx, file_obj in enumerate(file_list, start=1):
+                    if not hasattr(file_obj, 'content_type') or not file_obj.content_type.startswith('image/'):
+                        continue
 
-        return {
-            "success": True,
-            "message": "Image replaced successfully",
-            "data": {
-                **(image_row or {}),
-                "filename": filename,
-                "thumbnail": saved_info.get("thumbnail_path"),
-                "uploaded_file_local_path": UPLOADED_FILE_PATH
-            }
-        }
+                    # Underside logic
+                    slug_override = None
+                    seq_index = None
+                    if slug_key.startswith("undersideview"):
+                        if slug_key.endswith("01"):
+                            slug_override = "undersideview"
+                            seq_index = 1
+                        elif slug_key.endswith("02"):
+                            slug_override = "undersideview"
+                            seq_index = 2
+                        else:
+                            try:
+                                parts = slug_key.replace("undersideview", "")
+                                num = int(parts)
+                                slug_override = "undersideview"
+                                seq_index = num
+                            except: pass
 
-    except HTTPException:
-        raise
+                    saved_info = save_uploaded_file(file_obj, tank_number, image_type_id, index=seq_index, slug_override=slug_override)
+                    saved_file_paths.append(saved_info["image_path"]) 
+                    final_slug = saved_info.get("resolved_image_type_slug") or slug_key
+
+                    cursor.execute("""
+                        INSERT INTO tank_images 
+                        (emp_id, inspection_id, image_id, tank_number, image_type, image_path, thumbnail_path, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    """, (
+                        emp_to_use, 
+                        inspection_id, 
+                        image_type_id, 
+                        tank_number, 
+                        final_slug, 
+                        saved_info["image_path"],
+                        saved_info.get("thumbnail_path")
+                    ))
+
+                    successful_inserts.append({
+                        "image_type_id": image_type_id,
+                        "filename": saved_info["image_path"]
+                    })
+
+        conn.commit()
+        return {"success": True, "message": f"Replaced images. Uploaded {len(successful_inserts)} new images.", "data": successful_inserts}
+
     except Exception as e:
-        try:
-            if "new_path" in locals() and new_path:
-                delete_file(new_path)
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=str(e))
+        conn.rollback()
+        for p in saved_file_paths: delete_file(p)
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=f"Replace images failed: {str(e)}")
+    finally:
+        conn.close()
 
 # ------------------------------------------------------------------
 # ENDPOINT: Delete single image by id (DELETE) - requires Authorization header

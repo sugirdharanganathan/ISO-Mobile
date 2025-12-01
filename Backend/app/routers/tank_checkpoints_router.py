@@ -71,7 +71,7 @@ class FullInspectionChecklistCreate(BaseModel):
     sections: List[FullChecklistSection]
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "tank_id": " ",
                 "sections": [
@@ -94,11 +94,11 @@ class FullInspectionChecklistCreate(BaseModel):
                         "title": "Pipework & Installation",
                         "status_id": "",
                         "items": [
-                            {"sn": "2.1", "title": "Pipework Supports / Brackets – Not Loose / No Bent", "job_id": "2", "sub_job_id": "1"},
-                            {"sn": "2.2", "title": "Pipework Joint & Welding – No Crack / No Icing / No Leaking", "job_id": "2", "sub_job_id": "2"},
-                            {"sn": "2.3", "title": "Earthing Point", "job_id": "2", "sub_job_id": "3"},
-                            {"sn": "2.4", "title": "PBU Support & Flange Connection – No Leak / Not Damage", "job_id": "2", "sub_job_id": "4"},
-                            {"sn": "2.5", "title": "Others", "job_id": "2", "sub_job_id": "5"}
+                            {"sn": "2.1", "title": "Pipework Supports / Brackets – Not Loose / No Bent", "job_id": "2", "sub_job_id": "6"},
+                            {"sn": "2.2", "title": "Pipework Joint & Welding – No Crack / No Icing / No Leaking", "job_id": "2", "sub_job_id": "7"},
+                            {"sn": "2.3", "title": "Earthing Point", "job_id": "2", "sub_job_id": "8"},
+                            {"sn": "2.4", "title": "PBU Support & Flange Connection – No Leak / Not Damage", "job_id": "2", "sub_job_id": "9"},
+                            {"sn": "2.5", "title": "Others", "job_id": "2", "sub_job_id": "10"}
                         ]
                     },
                     {
@@ -107,13 +107,13 @@ class FullInspectionChecklistCreate(BaseModel):
                         "title": "Tank Instrument & Assembly",
                         "status_id": "",
                         "items": [
-                            {"sn": "3.1", "title": "Safety Diverter Valve – Switching Lever", "job_id": "3", "sub_job_id": "1"},
-                            {"sn": "3.2", "title": "Safety Valves Connection & Joint – No Leaks", "job_id": "3", "sub_job_id": "2"},
-                            {"sn": "3.3", "title": "Level & Pressure Gauge Support Bracket, Connection & Joint – Not Loosen / No Leaks", "job_id": "3", "sub_job_id": "3"},
-                            {"sn": "3.4", "title": "Level & Pressure Gauge – Function Check", "job_id": "3", "sub_job_id": "4"},
-                            {"sn": "3.5", "title": "Level & Pressure Gauge Valve Open / Balance Valve Close", "job_id": "3", "sub_job_id": "5"},
-                            {"sn": "3.6", "title": "Data & CSC Plate – Not Missing / Not Damage", "job_id": "3", "sub_job_id": "6"},
-                            {"sn": "3.7", "title": "Others", "job_id": "3", "sub_job_id": "7"}
+                            {"sn": "3.1", "title": "Safety Diverter Valve – Switching Lever", "job_id": "3", "sub_job_id": "11"},
+                            {"sn": "3.2", "title": "Safety Valves Connection & Joint – No Leaks", "job_id": "3", "sub_job_id": "12"},
+                            {"sn": "3.3", "title": "Level & Pressure Gauge Support Bracket, Connection & Joint – Not Loosen / No Leaks", "job_id": "3", "sub_job_id": "13"},
+                            {"sn": "3.4", "title": "Level & Pressure Gauge – Function Check", "job_id": "3", "sub_job_id": "14"},
+                            {"sn": "3.5", "title": "Level & Pressure Gauge Valve Open / Balance Valve Close", "job_id": "3", "sub_job_id": "15"},
+                            {"sn": "3.6", "title": "Data & CSC Plate – Not Missing / Not Damage", "job_id": "3", "sub_job_id": "16"},
+                            {"sn": "3.7", "title": "Others", "job_id": "3", "sub_job_id": "17"}
                         ]
                     },
                     {
@@ -122,11 +122,11 @@ class FullInspectionChecklistCreate(BaseModel):
                         "title": "Valves Tightness & Operation",
                         "status_id": "",
                         "items": [
-                            {"sn": "4.1", "title": "Valve Handwheel – Not Missing / Nut Not Loose", "job_id": "4", "sub_job_id": "1"},
-                            {"sn": "4.2", "title": "Valve Open & Close Operation – No Seizing / Not Tight / Not Jam", "job_id": "4", "sub_job_id": "2"},
-                            {"sn": "4.3", "title": "Valve Tightness Incl Glands – No Leak / No Icing / No Passing", "job_id": "4", "sub_job_id": "3"},
-                            {"sn": "4.4", "title": "Anchor Point", "job_id": "4", "sub_job_id": "4"},
-                            {"sn": "4.5", "title": "Others", "job_id": "4", "sub_job_id": "5"}
+                            {"sn": "4.1", "title": "Valve Handwheel – Not Missing / Nut Not Loose", "job_id": "4", "sub_job_id": "18"},
+                            {"sn": "4.2", "title": "Valve Open & Close Operation – No Seizing / Not Tight / Not Jam", "job_id": "4", "sub_job_id": "19"},
+                            {"sn": "4.3", "title": "Valve Tightness Incl Glands – No Leak / No Icing / No Passing", "job_id": "4", "sub_job_id": "20"},
+                            {"sn": "4.4", "title": "Anchor Point", "job_id": "4", "sub_job_id": "21"},
+                            {"sn": "4.5", "title": "Others", "job_id": "4", "sub_job_id": "22"}
                         ]
                     },
                     {
@@ -135,14 +135,14 @@ class FullInspectionChecklistCreate(BaseModel):
                         "title": "Before Departure Check",
                         "status_id": "",
                         "items": [
-                            {"sn": "5.1", "title": "All Valves Closed – Defrost & Close Firmly", "job_id": "5", "sub_job_id": "1"},
-                            {"sn": "5.2", "title": "Caps fitted to Outlets or Cover from Dust if applicable", "job_id": "5", "sub_job_id": "2"},
-                            {"sn": "5.3", "title": "Security Seal Fitted by Refilling Plant - Check", "job_id": "5", "sub_job_id": "3"},
-                            {"sn": "5.4", "title": "Pressure Gauge – lowest possible", "job_id": "5", "sub_job_id": "4"},
-                            {"sn": "5.5", "title": "Level Gauge – Within marking or standard indication", "job_id": "5", "sub_job_id": "5"},
-                            {"sn": "5.6", "title": "Weight Reading – ensure within acceptance weight", "job_id": "5", "sub_job_id": "6"},
-                            {"sn": "5.7", "title": "Cabin Door Lock – Secure and prevent from sudden opening", "job_id": "5", "sub_job_id": "7"},
-                            {"sn": "5.8", "title": "Others", "job_id": "5", "sub_job_id": "8"}
+                            {"sn": "5.1", "title": "All Valves Closed – Defrost & Close Firmly", "job_id": "5", "sub_job_id": "23"},
+                            {"sn": "5.2", "title": "Caps fitted to Outlets or Cover from Dust if applicable", "job_id": "5", "sub_job_id": "24"},
+                            {"sn": "5.3", "title": "Security Seal Fitted by Refilling Plant - Check", "job_id": "5", "sub_job_id": "25"},
+                            {"sn": "5.4", "title": "Pressure Gauge – lowest possible", "job_id": "5", "sub_job_id": "26"},
+                            {"sn": "5.5", "title": "Level Gauge – Within marking or standard indication", "job_id": "5", "sub_job_id": "27"},
+                            {"sn": "5.6", "title": "Weight Reading – ensure within acceptance weight", "job_id": "5", "sub_job_id": "28"},
+                            {"sn": "5.7", "title": "Cabin Door Lock – Secure and prevent from sudden opening", "job_id": "5", "sub_job_id": "29"},
+                            {"sn": "5.8", "title": "Others", "job_id": "5", "sub_job_id": "30"}
                         ]
                     },
                     {
@@ -380,6 +380,7 @@ def get_inspection_status():
         conn.close()
 
 
+# REPLACE THE OLD 'export_checklist_format' WITH THIS:
 @router.get("/export/checklist")
 def export_checklist_format():
     """Return jobs and sub-jobs in the exact JSON structure of the attached `checklist.json`.
@@ -402,8 +403,9 @@ def export_checklist_format():
             sections = []
             for job in jobs:
                 # determine section serial number (sn)
+                # Prefer the DB primary key (id or job_id) so that 'sn' contains the canonical id value
                 sec_sn = None
-                for k in ("sn", "job_id", "id", "job_code"):
+                for k in ("id", "job_id", "sn", "job_code"):
                     if job.get(k) is not None:
                         sec_sn = str(job.get(k))
                         break
@@ -418,39 +420,43 @@ def export_checklist_format():
                 subs = []
                 if jid_val is not None:
                     try:
-                        cursor.execute("SELECT * FROM inspection_sub_job WHERE job_id=%s ORDER BY COALESCE(sub_job_id, id), id", (jid_val,))
+                        cursor.execute("SELECT * FROM inspection_sub_job WHERE job_id=%s ORDER BY sub_job_id", (jid_val,))
                     except Exception:
                         try:
-                            cursor.execute("SELECT * FROM inspection_sub_job WHERE job_id=%s ORDER BY id", (jid_val,))
+                            cursor.execute("SELECT * FROM inspection_sub_job WHERE job_id=%s ORDER BY sub_job_id", (jid_val,))
                         except Exception:
                             cursor.execute("SELECT * FROM inspection_sub_job WHERE job_id=%s", (jid_val,))
                     subs = cursor.fetchall() or []
 
                 items = []
                 for s in subs:
+                    # Prefer sub_job_id (primary key) then id, then fallback to 'sn'
                     sub_sn = None
-                    for k in ("sn", "sub_job_id", "id"):
+                    for k in ("sub_job_id", "sn"):
                         if s.get(k) is not None:
                             sub_sn = str(s.get(k))
                             break
                     if sub_sn is None:
                         sub_sn = ""
 
-                    sub_title = s.get("sub_job_name") or s.get("description") or s.get("sub_job") or s.get("title") or None
+                    sub_title = s.get("sub_job_name") or s.get("sub_job") or s.get("title") or None
 
                     items.append({
-                        "sn": sub_sn,
+                        "sub_job_id": sub_sn,
                         "title": sub_title,
                     })
 
                 sections.append({
-                    "sn": sec_sn,
+                    "job_id": sec_sn,
                     "title": sec_title,
                     "items": items,
                 })
 
-            # Return exact JSON format (no extra wrapper) to match the attached `checklist.json` structure
-            return JSONResponse(status_code=200, content={"sections": sections})
+            # Return in uniform envelope: success/message/data -> data contains sections
+            return _success({"sections": sections}, message="Checklist exported successfully")
+    except Exception as e:
+        logger.exception("Error exporting checklist: %s", e)
+        return _error("Error exporting checklist", status_code=500)
     finally:
         conn.close()
 
@@ -460,7 +466,7 @@ def create_inspection_checklist_bulk(
     payload: FullInspectionChecklistCreate = Body(
         ...,
         example={
-            "tank_id": " ",
+            "tank_id": 1,
             "sections": [
                 {
                     "job_id": "1",
@@ -479,11 +485,11 @@ def create_inspection_checklist_bulk(
                     "title": "Pipework & Installation",
                     "status_id": "",
                     "items": [
-                        {"sn": "2.1", "title": "Pipework Supports / Brackets – Not Loose / No Bent", "comments": "", "sub_job_id": "1"},
-                        {"sn": "2.2", "title": "Pipework Joint & Welding – No Crack / No Icing / No Leaking", "comments": "", "sub_job_id": "2"},
-                        {"sn": "2.3", "title": "Earthing Point", "comments": "", "sub_job_id": "3"},
-                        {"sn": "2.4", "title": "PBU Support & Flange Connection – No Leak / Not Damage", "comments": "", "sub_job_id": "4"},
-                        {"sn": "2.5", "title": "Others", "comments": "", "sub_job_id": "5"}
+                        {"sn": "2.1", "title": "Pipework Supports / Brackets – Not Loose / No Bent", "comments": "", "sub_job_id": "6"},
+                        {"sn": "2.2", "title": "Pipework Joint & Welding – No Crack / No Icing / No Leaking", "comments": "", "sub_job_id": "7"},
+                        {"sn": "2.3", "title": "Earthing Point", "comments": "", "sub_job_id": "8"},
+                        {"sn": "2.4", "title": "PBU Support & Flange Connection – No Leak / Not Damage", "comments": "", "sub_job_id": "9"},
+                        {"sn": "2.5", "title": "Others", "comments": "", "sub_job_id": "10"}
                     ]
                 },
                 {
@@ -491,13 +497,13 @@ def create_inspection_checklist_bulk(
                     "title": "Tank Instrument & Assembly",
                     "status_id": "",
                     "items": [
-                        {"sn": "3.1", "title": "Safety Diverter Valve – Switching Lever", "comments": "", "sub_job_id": "1"},
-                        {"sn": "3.2", "title": "Safety Valves Connection & Joint – No Leaks", "comments": "", "sub_job_id": "2"},
-                        {"sn": "3.3", "title": "Level & Pressure Gauge Support Bracket, Connection & Joint – Not Loosen / No Leaks", "comments": "", "sub_job_id": "3"},
-                        {"sn": "3.4", "title": "Level & Pressure Gauge – Function Check", "comments": "", "sub_job_id": "4"},
-                        {"sn": "3.5", "title": "Level & Pressure Gauge Valve Open / Balance Valve Close", "comments": "", "sub_job_id": "5"},
-                        {"sn": "3.6", "title": "Data & CSC Plate – Not Missing / Not Damage", "comments": "", "sub_job_id": "6"},
-                        {"sn": "3.7", "title": "Others", "comments": "", "sub_job_id": "7"}
+                        {"sn": "3.1", "title": "Safety Diverter Valve – Switching Lever", "comments": "", "sub_job_id": "11"},
+                        {"sn": "3.2", "title": "Safety Valves Connection & Joint – No Leaks", "comments": "", "sub_job_id": "12"},
+                        {"sn": "3.3", "title": "Level & Pressure Gauge Support Bracket, Connection & Joint – Not Loosen / No Leaks", "comments": "", "sub_job_id": "13"},
+                        {"sn": "3.4", "title": "Level & Pressure Gauge – Function Check", "comments": "", "sub_job_id": "14"},
+                        {"sn": "3.5", "title": "Level & Pressure Gauge Valve Open / Balance Valve Close", "comments": "", "sub_job_id": "15"},
+                        {"sn": "3.6", "title": "Data & CSC Plate – Not Missing / Not Damage", "comments": "", "sub_job_id": "16"},
+                        {"sn": "3.7", "title": "Others", "comments": "", "sub_job_id": "17"}
                     ]
                 },
                 {
@@ -505,11 +511,11 @@ def create_inspection_checklist_bulk(
                     "title": "Valves Tightness & Operation",
                     "status_id": "",
                     "items": [
-                        {"sn": "4.1", "title": "Valve Handwheel – Not Missing / Nut Not Loose", "comments": "", "sub_job_id": "1"},
-                        {"sn": "4.2", "title": "Valve Open & Close Operation – No Seizing / Not Tight / Not Jam", "comments": "", "sub_job_id": "2"},
-                        {"sn": "4.3", "title": "Valve Tightness Incl Glands – No Leak / No Icing / No Passing", "comments": "", "sub_job_id": "3"},
-                        {"sn": "4.4", "title": "Anchor Point", "comments": "", "sub_job_id": "4"},
-                        {"sn": "4.5", "title": "Others", "comments": "", "sub_job_id": "5"}
+                        {"sn": "4.1", "title": "Valve Handwheel – Not Missing / Nut Not Loose", "comments": "", "sub_job_id": "18"},
+                        {"sn": "4.2", "title": "Valve Open & Close Operation – No Seizing / Not Tight / Not Jam", "comments": "", "sub_job_id": "19"},
+                        {"sn": "4.3", "title": "Valve Tightness Incl Glands – No Leak / No Icing / No Passing", "comments": "", "sub_job_id": "20"},
+                        {"sn": "4.4", "title": "Anchor Point", "comments": "", "sub_job_id": "21"},
+                        {"sn": "4.5", "title": "Others", "comments": "", "sub_job_id": "22"}
                     ]
                 },
                 {
@@ -517,14 +523,14 @@ def create_inspection_checklist_bulk(
                     "title": "Before Departure Check",
                     "status_id": "",
                     "items": [
-                        {"sn": "5.1", "title": "All Valves Closed – Defrost & Close Firmly", "comments": "", "sub_job_id": "1"},
-                        {"sn": "5.2", "title": "Caps fitted to Outlets or Cover from Dust if applicable", "comments": "", "sub_job_id": "2"},
-                        {"sn": "5.3", "title": "Security Seal Fitted by Refilling Plant - Check", "comments": "", "sub_job_id": "3"},
-                        {"sn": "5.4", "title": "Pressure Gauge – lowest possible", "comments": "", "sub_job_id": "4"},
-                        {"sn": "5.5", "title": "Level Gauge – Within marking or standard indication", "comments": "", "sub_job_id": "5"},
-                        {"sn": "5.6", "title": "Weight Reading – ensure within acceptance weight", "comments": "", "sub_job_id": "6"},
-                        {"sn": "5.7", "title": "Cabin Door Lock – Secure and prevent from sudden opening", "comments": "", "sub_job_id": "7"},
-                        {"sn": "5.8", "title": "Others", "comments": "", "sub_job_id": "8"}
+                        {"sn": "5.1", "title": "All Valves Closed – Defrost & Close Firmly", "comments": "", "sub_job_id": "23"},
+                        {"sn": "5.2", "title": "Caps fitted to Outlets or Cover from Dust if applicable", "comments": "", "sub_job_id": "24"},
+                        {"sn": "5.3", "title": "Security Seal Fitted by Refilling Plant - Check", "comments": "", "sub_job_id": "25"},
+                        {"sn": "5.4", "title": "Pressure Gauge – lowest possible", "comments": "", "sub_job_id": "26"},
+                        {"sn": "5.5", "title": "Level Gauge – Within marking or standard indication", "comments": "", "sub_job_id": "27"},
+                        {"sn": "5.6", "title": "Weight Reading – ensure within acceptance weight", "comments": "", "sub_job_id": "28"},
+                        {"sn": "5.7", "title": "Cabin Door Lock – Secure and prevent from sudden opening", "comments": "", "sub_job_id": "29"},
+                        {"sn": "5.8", "title": "Others", "comments": "", "sub_job_id": "30"}
                     ]
                 },
                 {
@@ -538,7 +544,7 @@ def create_inspection_checklist_bulk(
         }
     ),
     Authorization: Optional[str] = Header(None),
-    Inspection_Id: Optional[Union[int, str]] = Header(None, alias="Inspection-Id"),
+    Inspection_Id: Optional[Union[int, str]] = Header(None, alias="inspection_id"),
     db: Session = Depends(get_db),
 ):
     logger.debug(f"create_inspection_checklist_bulk: Authorization header: {Authorization}")
@@ -571,8 +577,17 @@ def create_inspection_checklist_bulk(
                 # Try numeric id lookup first (canonical). If not found, attempt to match by job_code/job_name/job_description
                 job_row = None
                 try:
-                    # attempt numeric id match
-                    job_row = db.execute(text("SELECT * FROM inspection_job WHERE id = :jid LIMIT 1"), {"jid": section.job_id}).mappings().fetchone()
+                    # First, try numeric id match using the `id` column (this is the canonical column in many DB schemas)
+                    jid_val = None
+                    try:
+                        jid_val = int(section.job_id)
+                    except Exception:
+                        jid_val = None
+                    if jid_val is not None:
+                        try:
+                            job_row = db.execute(text("SELECT * FROM inspection_job WHERE id = :jid LIMIT 1"), {"jid": jid_val}).mappings().fetchone()
+                        except Exception:
+                            job_row = None
                 except Exception:
                     job_row = None
                 if not job_row:
@@ -584,14 +599,27 @@ def create_inspection_checklist_bulk(
                             candidate_rows = db.execute(text("SELECT * FROM inspection_job"), {}).mappings().fetchall()
                         except Exception:
                             candidate_rows = []
+                        # If the user provided a numeric string, also try to match against id.
                         job_row = None
-                        for jr in candidate_rows:
-                            for key in ("job_name", "job_description", "description", "job_code"):
-                                if key in jr and jr.get(key) is not None and str(jr.get(key)).strip() == jstr:
-                                    job_row = jr
+                        if jstr.isdigit():
+                            try:
+                                # Prefer a direct DB match; don't reference columns that may not exist.
+                                candidate_id = int(jstr)
+                                candidate_match = db.execute(text("SELECT * FROM inspection_job WHERE id = :jid LIMIT 1"), {"jid": candidate_id}).mappings().fetchone()
+                                if candidate_match:
+                                    job_row = candidate_match
+                            except Exception:
+                                job_row = None
+                        if job_row is None:
+                            for jr in candidate_rows:
+                                # allow both textual and coded matches
+                                # keys may vary across schemas; check all likely candidates (case-sensitive) and fallback to normalized lower keys
+                                for key in ("job_name", "job_description", "description", "job_code"):
+                                    if key in jr and jr.get(key) is not None and str(jr.get(key)).strip() == jstr:
+                                        job_row = jr
+                                        break
+                                if job_row:
                                     break
-                            if job_row:
-                                break
                 if not job_row:
                     return _error(f"Job not found: {section.job_id}", status_code=400)
 
@@ -613,7 +641,7 @@ def create_inspection_checklist_bulk(
                     if not sub_row:
                         try:
                             sub_row = db.execute(
-                                text("SELECT * FROM inspection_sub_job WHERE id=:sid AND job_id=:jid LIMIT 1"),
+                                text("SELECT * FROM inspection_sub_job WHERE sub_job_id=:sid AND job_id=:jid LIMIT 1"),
                                 {"sid": item.sub_job_id, "jid": jid_val}
                             ).mappings().fetchone()
                         except Exception:
@@ -625,7 +653,7 @@ def create_inspection_checklist_bulk(
                         title_str = (item.title or "").strip()
                         try:
                             candidate_subs = db.execute(
-                                text("SELECT * FROM inspection_sub_job WHERE job_id = :jid ORDER BY COALESCE(sub_job_id, id), id"),
+                                text("SELECT * FROM inspection_sub_job WHERE job_id = :jid ORDER BY sub_job_id"),
                                 {"jid": jid_val}
                             ).mappings().fetchall()
                         except Exception:
@@ -649,7 +677,7 @@ def create_inspection_checklist_bulk(
                         if sub_row is None:
                             for sr in candidate_subs:
                                 if sstr != "":
-                                    if ("id" in sr and str(sr.get("id")) == sstr) or ("sub_job_id" in sr and str(sr.get("sub_job_id")) == sstr):
+                                    if ("sub_job_id" in sr and str(sr.get("sub_job_id")) == sstr):
                                         sub_row = sr
                                         break
                                 if title_str:
@@ -671,34 +699,68 @@ def create_inspection_checklist_bulk(
                     if item.sn and str(item.sn).strip() != "":
                         sn_val = str(item.sn).strip()
                     else:
+                        # Prefer the existing stored `sn` if present
                         if sub_row.get("sn"):
                             sn_val = str(sub_row.get("sn"))
+                        # Prefer sub_job_name as a fallback textual label
                         elif sub_row.get("sub_job_name"):
                             sn_val = str(sub_row.get("sub_job_name"))[:16]
-                        elif sub_row.get("id") is not None:
-                            sn_val = str(sub_row.get("id"))
+                        # Use numeric sub_job_id if present
+                        elif sub_row.get("sub_job_id") is not None:
+                            sn_val = str(sub_row.get("sub_job_id"))
                         else:
+                            # If nothing set, try to derive a sn based on position among candidate_subs
                             sn_val = ""
+                            if 'candidate_subs' in locals() and sub_row is not None:
+                                try:
+                                    pos_idx = next((i for i, sr in enumerate(candidate_subs, start=1) if (sr.get('sub_job_id') == sub_row.get('sub_job_id') or sr.get('id') == sub_row.get('id'))), None)
+                                    if pos_idx is not None:
+                                        sn_val = f"{jid_val}.{pos_idx}"
+                                except Exception:
+                                    # if deriving fails, leave sn_val as empty or text fallback
+                                    if not sn_val:
+                                        sn_val = str(sub_row.get('sub_job_name'))[:16] if sub_row.get('sub_job_name') else (str(sub_row.get('sub_job_id') or '') if sub_row.get('sub_job_id') else "")
 
                     # Use DB canonical job id if available, otherwise fall back to provided section.job_id (less preferable)
                     db_job_id = None
                     if job_row is not None:
                         db_job_id = job_row.get("id") or job_row.get("job_id")
+                    
+                    # Fetch job_name from the job_row
+                    job_name_val = None
+                    if job_row:
+                        job_name_val = (job_row.get("job_name") or 
+                                       job_row.get("job_description") or 
+                                       job_row.get("description") or 
+                                       job_row.get("job_code") or 
+                                       job_row.get("job"))
+                    
+                    # Fetch status name from inspection_status table
+                    status_name_val = None
+                    try:
+                        status_row = db.execute(text(
+                            "SELECT status FROM inspection_status WHERE id = :status_id LIMIT 1"
+                        ), {"status_id": status_id_final}).mappings().fetchone()
+                        if status_row:
+                            status_name_val = status_row.get("status")
+                    except Exception:
+                        pass
 
                     # ---- INSERT the checklist row (moved OUT of the 'else' fallback) ----
                     db.execute(text(
-                        "INSERT INTO inspection_checklist (inspection_id, tank_id, emp_id, job_id, job_name, sn, sub_job_id, sub_job_description, status_id, comment, flagged, created_at)"
-                        " VALUES (:inspection_id, :tank_id, :emp_id, :job_id, :job_name, :sn, :sub_job_id, :sub_job_description, :status_id, :comment, :flagged, NOW())"
+                        "INSERT INTO inspection_checklist (inspection_id, tank_id, emp_id, job_id, job_name, sn, sub_job_id, sub_job_description, status_id, status, comment, flagged, created_at)"
+                        " VALUES (:inspection_id, :tank_id, :emp_id, :job_id, :job_name, :sn, :sub_job_id, :sub_job_description, :status_id, :status, :comment, :flagged, NOW())"
                     ), {
                         "inspection_id": inspection_id,
                         "tank_id": tank_id,
                         "emp_id": emp_id,
                         "job_id": db_job_id if db_job_id is not None else section.job_id,
-                        "job_name": job_row.get("job_name") or job_row.get("job") or None,
+                        "job_name": job_name_val,
                         "sn": sn_val,
-                        "sub_job_id": sub_row.get("sub_job_id") or sub_row.get("id"),
+                        "sub_job_id": sub_row.get("sub_job_id") or sub_row.get("sub_job_id"),
                         "sub_job_description": getattr(item, 'title', None),
                         "status_id": status_id_final,
+                        "status": status_name_val,
                         "comment": getattr(item, 'comments', None),
                         "flagged": flagged_val,
                     })
@@ -717,7 +779,7 @@ def create_inspection_checklist_bulk(
                                 "inspection_id": inspection_id,
                                 "tank_id": tank_id,
                                 "job_id": db_job_id if db_job_id is not None else section.job_id,
-                                "sub_job_id": sub_row.get("sub_job_id") or sub_row.get("id")
+                                "sub_job_id": sub_row.get("sub_job_id")
                             }).mappings().fetchone()
 
                             if sel:
@@ -819,63 +881,159 @@ def delete_inspection_checklist(payload: ChecklistDeleteByInspection, Authorizat
     except Exception as e:
         logger.exception("Error deleting inspection checklist")
         raise HTTPException(status_code=500, detail=f"Error deleting inspection checklist: {e}")
-@router.put("/update/job_status")
-def update_job_status(
-    inspection_id: int = Body(..., embed=True),
-    job_id: int = Body(..., embed=True),
-    status_id: int = Body(..., embed=True),
+@router.put("/update/checklist")
+def update_checklist_by_inspection(
+    items: List[dict],
     Authorization: Optional[str] = Header(None),
+    Inspection_Id: Optional[Union[int,str]] = Header(None, alias="inspection_id"),
     db: Session = Depends(get_db),
 ):
     """
-    Update status_id for all sub-jobs under a job_id for a given inspection_id.
-    If status_id == 2, flag and sync to to_do_list.
+    Update checklist items by `inspection_id` provided in the header.
+    Only fields present in each item are updated. Authorization is required.
+    Items may be identified using `id` or by `job_id` + `sub_job_id` or by `sub_job_id` alone.
+    If `status_id` becomes a flagged status (e.g., 2), it syncs to `to_do_list`, otherwise it is removed.
     """
     token_sub = _get_token_subject(Authorization)
     if token_sub is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authorization required.")
     emp_id = _resolve_emp_id_from_users(token_sub)
+    if Inspection_Id is None or str(Inspection_Id).strip() == "":
+        raise HTTPException(status_code=400, detail="inspection_id header required")
     try:
-        with db.begin():
-            # Update all checklist items for this inspection_id and job_id
-            checklist_items = db.execute(text(
-                "SELECT * FROM inspection_checklist WHERE inspection_id = :inspection_id AND job_id = :job_id"
-            ), {"inspection_id": inspection_id, "job_id": job_id}).mappings().fetchall()
-            for item in checklist_items:
-                db.execute(text(
-                    "UPDATE inspection_checklist SET status_id = :status_id, flagged = :flagged WHERE id = :id"
-                ), {
-                    "status_id": status_id,
-                    "flagged": 1 if status_id == 2 else 0,
-                    "id": item["id"]
-                })
-                # If flagged, sync to to_do_list
-                if status_id == 2:
-                    sel = db.execute(text(
-                        "SELECT id, job_name, sub_job_description, sn, status_id, comment, created_at, tank_id, inspection_id FROM inspection_checklist WHERE id = :id"
-                    ), {"id": item["id"]}).mappings().fetchone()
-                    if sel:
-                        db.execute(text(
-                            "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at) "
-                            "VALUES (:checklist_id, :inspection_id, :tank_id, :job_name, :sub_job_description, :sn, :status_id, :comment, :created_at) "
-                            "ON DUPLICATE KEY UPDATE inspection_id=VALUES(inspection_id), tank_id=VALUES(tank_id), job_name=VALUES(job_name), sub_job_description=VALUES(sub_job_description), sn=VALUES(sn), status_id=VALUES(status_id), comment=VALUES(comment), created_at=VALUES(created_at)"
-                        ), {
-                            "checklist_id": sel["id"],
-                            "inspection_id": sel["inspection_id"],
-                            "tank_id": sel["tank_id"],
-                            "job_name": sel["job_name"],
-                            "sub_job_description": sel["sub_job_description"],
-                            "sn": sel["sn"] or "",
-                            "status_id": sel["status_id"],
-                            "comment": sel["comment"],
-                            "created_at": sel["created_at"]
-                        })
+        inspection_id = int(str(Inspection_Id))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid inspection_id header value")
 
-        db.commit()
-        return _success(message="Job status updated successfully.")
-    except Exception as e:
-        logger.exception("Error updating job status")
-        return _error(str(e), status_code=500)
+    conn = get_db_connection()
+    updated_count = 0
+    try:
+        with conn.cursor(DictCursor) as cursor:
+            for item in items:
+                # identify the checklist row for this inspection
+                checklist_row = None
+                if item.get('id') is not None:
+                    try:
+                        cursor.execute("SELECT * FROM inspection_checklist WHERE id=%s AND inspection_id=%s LIMIT 1", (item.get('id'), inspection_id))
+                        checklist_row = cursor.fetchone()
+                    except Exception:
+                        checklist_row = None
+
+                if not checklist_row and item.get('sub_job_id') is not None:
+                    # attempt to match by job_id + sub_job_id if provided
+                    jid = item.get('job_id') if isinstance(item, dict) else getattr(item, 'job_id', None)
+                    try:
+                        if jid is not None:
+                            cursor.execute("SELECT * FROM inspection_checklist WHERE inspection_id=%s AND job_id=%s AND sub_job_id=%s LIMIT 1", (inspection_id, jid, item.get('sub_job_id')))
+                            checklist_row = cursor.fetchone()
+                        else:
+                            # try match by sub_job_id alone (within inspection_id)
+                            cursor.execute("SELECT * FROM inspection_checklist WHERE inspection_id=%s AND sub_job_id=%s LIMIT 1", (inspection_id, item.get('sub_job_id')))
+                            checklist_row = cursor.fetchone()
+                    except Exception:
+                        checklist_row = None
+
+                if not checklist_row and item.get('sn') is not None:
+                    try:
+                        cursor.execute("SELECT * FROM inspection_checklist WHERE inspection_id=%s AND sn=%s LIMIT 1", (inspection_id, item.get('sn')))
+                        checklist_row = cursor.fetchone()
+                    except Exception:
+                        checklist_row = None
+
+                if not checklist_row:
+                    # skip or optionally return error — we'll return error for clarity
+                    return _error(f"Checklist row not found for item: {item}", status_code=404)
+
+                # Build partial update — only update provided fields
+                update_fields = []
+                params = {"id": checklist_row.get('id')}
+                if item.get('status_id') is not None:
+                    update_fields.append("status_id = %(status_id)s")
+                    params['status_id'] = item.get('status_id')
+                    params['flagged'] = 1 if (item.get('status_id') in FAULTY_STATUS_IDS) else 0
+                    update_fields.append("flagged = %(flagged)s")
+                    
+                    # Fetch and update status name from inspection_status table
+                    try:
+                        cursor.execute("SELECT status FROM inspection_status WHERE id = %s LIMIT 1", (item.get('status_id'),))
+                        status_row = cursor.fetchone()
+                        if status_row:
+                            update_fields.append("status = %(status)s")
+                            params['status'] = status_row.get('status')
+                    except Exception:
+                        pass
+                
+                if item.get('comment') is not None:
+                    update_fields.append("comment = %(comment)s")
+                    params['comment'] = item.get('comment')
+                
+                # If job_name is missing in the checklist row, populate it from inspection_job
+                if not checklist_row.get('job_name') and checklist_row.get('job_id'):
+                    try:
+                        cursor.execute("SELECT job_name, job_description, description, job_code, job FROM inspection_job WHERE id = %s LIMIT 1", (checklist_row.get('job_id'),))
+                        job_row = cursor.fetchone()
+                        if job_row:
+                            job_name_val = (job_row.get('job_name') or 
+                                          job_row.get('job_description') or 
+                                          job_row.get('description') or 
+                                          job_row.get('job_code') or 
+                                          job_row.get('job'))
+                            if job_name_val:
+                                update_fields.append("job_name = %(job_name)s")
+                                params['job_name'] = job_name_val
+                    except Exception:
+                        pass
+
+                if not update_fields:
+                    # nothing to update for this item; continue
+                    continue
+
+                sql = f"UPDATE inspection_checklist SET {', '.join(update_fields)}, updated_at = NOW() WHERE id = %(id)s"
+                try:
+                    cursor.execute(sql, params)
+                    updated_count += 1
+                    logger.debug("Updated inspection_checklist id=%s via inspection_id=%s fields=%s", checklist_row.get('id'), inspection_id, ','.join(update_fields))
+                except Exception:
+                    logger.exception("Failed to update inspection_checklist id=%s", checklist_row.get('id'))
+                    conn.rollback()
+                    return _error("Failed to update checklist", status_code=500)
+
+                # Sync flagged status to to_do_list
+                try:
+                    if 'status_id' in params and params['status_id'] in FAULTY_STATUS_IDS:
+                        # Insert or update to_do_list
+                        # select row to get timestamp and other fields
+                        cursor.execute("SELECT id, job_name, sub_job_description, sn, status_id, comment, created_at, tank_id, inspection_id FROM inspection_checklist WHERE id=%s LIMIT 1", (checklist_row.get('id'),))
+                        sel = cursor.fetchone()
+                        if sel:
+                            try:
+                                cursor.execute(
+                                    "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE inspection_id=VALUES(inspection_id), tank_id=VALUES(tank_id), job_name=VALUES(job_name), sub_job_description=VALUES(sub_job_description), sn=VALUES(sn), status_id=VALUES(status_id), comment=VALUES(comment), created_at=VALUES(created_at)",
+                                    (sel['id'], sel['inspection_id'], sel['tank_id'], sel['job_name'], sel['sub_job_description'], sel['sn'] or '', sel['status_id'], sel['comment'], sel['created_at'])
+                                )
+                            except Exception:
+                                # fallback insert without created_at
+                                try:
+                                    cursor.execute(
+                                        "INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE inspection_id=VALUES(inspection_id), tank_id=VALUES(tank_id), job_name=VALUES(job_name), sub_job_description=VALUES(sub_job_description), sn=VALUES(sn), status_id=VALUES(status_id), comment=VALUES(comment)",
+                                        (sel['id'], sel['inspection_id'], sel['tank_id'], sel['job_name'], sel['sub_job_description'], sel['sn'] or '', sel['status_id'], sel['comment'])
+                                    )
+                                except Exception:
+                                    logger.exception("Failed to upsert to_do_list for checklist id=%s", sel['id'])
+                    else:
+                        # remove any existing to_do_list entry for this checklist id
+                        cursor.execute("DELETE FROM to_do_list WHERE checklist_id = %s", (checklist_row.get('id'),))
+                except Exception:
+                    logger.exception("Failed to sync flagged status for checklist id=%s", checklist_row.get('id'))
+
+            conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return _success({"updated_count": updated_count}, message=f"Successfully updated {updated_count} checklist items.")
 
 
 @router.get("/get/checklist_by_inspection_id/{inspection_id}")
@@ -914,7 +1072,7 @@ def get_checklist_by_inspection_id(
                 sections[job_id] = {
                     "job_id": job_id,
                     "title": item.get("job_name"),
-                    "status_name": status_map.get(item.get("status_id")) or str(item.get("status_id", "")),
+                    "status_id": str(item.get("status_id", "")),
                     "items": []
                 }
             sections[job_id]["items"].append({
@@ -937,3 +1095,53 @@ def get_checklist_by_inspection_id(
         return _error(str(e), status_code=500)
 
  
+# -------------------------
+# BULK UPDATE CHECKLIST
+# -------------------------
+# ---------------------------------------------------------
+# NEW BULK UPDATE LOGIC (Adapted for your file)
+# ---------------------------------------------------------
+
+# 1. Define the Update Model
+# NOTE: Using plain dict payloads for update items instead of a Pydantic model ensures
+# compatibility across schema variants and allows partial updates. Each item should
+# contain at minimum one identifier (id or sub_job_id + job_id or sn) and update fields.
+
+# 2. Local Helper to Sync To-Do (Avoids circular imports)
+def _sync_flagged_to_todo_local(cursor, checklist_id: int):
+    """
+    Sync a flagged checklist row to to_do_list.
+    """
+    cursor.execute("""
+        SELECT id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at
+        FROM inspection_checklist
+        WHERE id=%s AND flagged=1
+    """, (checklist_id,))
+    row = cursor.fetchone()
+    if not row:
+        return
+
+    # Use INSERT ... ON DUPLICATE KEY UPDATE to ensure we don't create duplicates
+    # Note: to_do_list usually relies on (checklist_id) being unique or managed logic
+    # We first try to delete any existing sync for this checklist item to be clean
+    cursor.execute("DELETE FROM to_do_list WHERE checklist_id=%s", (checklist_id,))
+    
+    cursor.execute("""
+        INSERT INTO to_do_list (checklist_id, inspection_id, tank_id, job_name, sub_job_description, sn, status_id, comment, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    """, (
+        checklist_id,
+        row['inspection_id'],
+        row['tank_id'],
+        row['job_name'],
+        row['sub_job_description'],
+        row['sn'],
+        row['status_id'],
+        row['comment']
+    ))
+
+# 3. The Bulk Update Endpoint (Deprecated)
+# NOTE: `/update/checklist_bulk` was previously provided; a single endpoint `/update/checklist`
+# is now used with `inspection_id` in the header. The old endpoint has been removed to avoid
+# duplication of behavior and confusion. Use `PUT /api/tank_checkpoints/update/checklist` with
+# Authorization header and inspection_id header to perform partial updates.

@@ -141,7 +141,8 @@ def login_user(body: LoginRequest):
                     status_code=401,
                     content={
                         "success": False,
-                        "message": "Invalid user credentials or no user found"
+                        "message": "Invalid user credentials or no user found",
+                        "data": {}
                     }
                 )
 
@@ -153,7 +154,8 @@ def login_user(body: LoginRequest):
                     status_code=401,
                     content={
                         "success": False,
-                        "message": "Invalid user credentials or no user found"
+                        "message": "Invalid user credentials or no user found",
+                        "data": {}
                     }
                 )
 

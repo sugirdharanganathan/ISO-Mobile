@@ -21,17 +21,17 @@ class TankInspectionCreate(BaseModel):
     class Config:
         schema_extra = {
             "example": {
-                "created_by": "user@example.com",
-                "tank_id": 12,
+                "created_by": "string",
+                "tank_id": 0,
                 "status_id": 1,
                 "product_id": 3,
                 "inspection_type_id": 2,
                 "location_id": 4,
                 "safety_valve_brand_id": 2,
-                "safety_valve_model_id": 1,
-                "safety_valve_size_id": 1,
+                "safety_valve_model_id": 0,
+                "safety_valve_size_id": 0,
                 "notes": "All checks OK",
-                "operator_id": 55
+                "operator_id": 0
             }
         }
 

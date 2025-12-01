@@ -19,10 +19,10 @@ class TankInspectionDetails(Base):
     report_number = Column(String(50), nullable=False, unique=True, index=True)
     tank_id = Column(Integer, ForeignKey("tank_details.tank_id", ondelete="SET NULL"), nullable=True, index=True)
     tank_number = Column(String(50), nullable=False, index=True)
-    status_id = Column(Integer, nullable=False, index=True)
-    product_id = Column(Integer, nullable=False, index=True)
-    inspection_type_id = Column(Integer, nullable=False)
-    location_id = Column(Integer, nullable=False)
+    status_id = Column(Integer, nullable=True, index=True)
+    product_id = Column(Integer, nullable=True, index=True)
+    inspection_type_id = Column(Integer, nullable=True)
+    location_id = Column(Integer, nullable=True)
     working_pressure = Column(Numeric(12, 2))
     design_temperature = Column(Numeric(12, 2))
     frame_type = Column(String(255))
@@ -34,6 +34,7 @@ class TankInspectionDetails(Base):
     pi_next_inspection_date = Column(Date)
     notes = Column(Text)
     lifter_weight = Column(String(255), nullable=True)
+    lifter_weight_thumbnail = Column(String(255), nullable=True)
     emp_id = Column(Integer, ForeignKey("users.emp_id"), nullable=True, index=True)
     operator_id = Column(Integer, nullable=True, index=True)
     ownership = Column(String(16), nullable=True, index=True)
@@ -71,6 +72,7 @@ class TankInspectionDetails(Base):
             "pi_next_inspection_date": self.pi_next_inspection_date.isoformat() if self.pi_next_inspection_date else None,
             "notes": self.notes,
             "lifter_weight": self.lifter_weight,
+            "lifter_weight_thumbnail": self.lifter_weight_thumbnail,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "created_by": self.created_by,

@@ -2,14 +2,18 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, func, F
 from sqlalchemy.orm import relationship
 from app.database import Base
 
-
 class InspectionChecklist(Base):
     __tablename__ = "inspection_checklist"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 1. REMOVE the standard 'id' column
+    # id = Column(Integer, primary_key=True, autoincrement=True)
 
-    # inspection_id references tank_inspection_details.inspection_id
-    inspection_id = Column(Integer, ForeignKey("tank_inspection_details.inspection_id", ondelete="CASCADE"), nullable=False, index=True)
+    # 2. Add 'primary_key=True' to inspection_id
+    inspection_id = Column(Integer, ForeignKey("tank_inspection_details.inspection_id", ondelete="CASCADE"), primary_key=True, nullable=False, index=True)
+
+    # 3. Add 'primary_key=True' to sub_job_id
+    # CRITICAL: This MUST be nullable=False for a Primary Key
+    sub_job_id = Column(Integer, primary_key=True, nullable=False)
 
     # tank_id references tank_details.tank_id (optional, no FK to avoid issues)
     tank_id = Column(Integer, nullable=True, index=True)
@@ -19,7 +23,7 @@ class InspectionChecklist(Base):
 
     job_id = Column(Integer, nullable=True)
     job_name = Column(String(255), nullable=True)
-    sub_job_id = Column(Integer, nullable=True)
+    
     sn = Column(String(16), nullable=False)
     sub_job_description = Column(String(512), nullable=True)
 

@@ -7,10 +7,11 @@ class InspectionSubJob(Base):
     __tablename__ = "inspection_sub_job"
 
     sub_job_id = Column(Integer, primary_key=True, autoincrement=True)
-    job_id = Column(Integer, ForeignKey("inspection_job.job_id", ondelete="CASCADE"), nullable=False)
-    sn = Column(String(16), nullable=False, unique=True)
-    sub_job_description = Column(String(512), nullable=False)
-    sort_order = Column(Integer, default=0)
+    # job_id references inspection_job.id in DB; map to Python attr job_id
+    job_id = Column(Integer, ForeignKey("inspection_job.id", ondelete="CASCADE"), nullable=False)
+    sn = Column(String(32), nullable=True)
+    # Keep sub_job_name as the main textual title of the sub-job
+    sub_job_name = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 

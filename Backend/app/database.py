@@ -728,11 +728,131 @@ def init_db():
                         ('Before Departure Check', ''),
                         ('Others Observation & Comment', ''),
                     ]
+                    # Determine which columns exist for inspection_job and insert accordingly
+                    cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=%s AND table_name='inspection_job'", (DB_NAME,))
+                    raw_cols = cursor.fetchall() or []
+                    # Interpret rows robustly: support dicts/tuples and different key names.
+                    parsed_cols = set()
+                    for r in raw_cols:
+                        col_val = None
+                        if isinstance(r, dict):
+                            # take the first non-None value
+                            for v in r.values():
+                                if v is not None:
+                                    col_val = v
+                                    break
+                        elif isinstance(r, (list, tuple)) and len(r) > 0:
+                            col_val = r[0]
+                        else:
+                            col_val = r
+                        if col_val:
+                            parsed_cols.add(str(col_val).lower())
+                    cols = parsed_cols
+                    logger.info(f"inspection_job columns detected (raw={raw_cols}): {cols}")
+                    # Two common variants: (job_name, description) OR (job_code, job_description)
+                    insert_sql = None
+                    if 'job_name' in cols and 'description' in cols:
+                        if 'sort_order' in cols:
+                            insert_sql = "INSERT INTO inspection_job (job_name, description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                        else:
+                            insert_sql = "INSERT INTO inspection_job (job_name, description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+                    elif 'job_code' in cols and 'job_description' in cols:
+                        if 'sort_order' in cols:
+                            insert_sql = "INSERT INTO inspection_job (job_code, job_description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                        else:
+                            insert_sql = "INSERT INTO inspection_job (job_code, job_description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+                    elif 'job_name' in cols and 'job_description' in cols:
+                        if 'sort_order' in cols:
+                            insert_sql = "INSERT INTO inspection_job (job_name, job_description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                        else:
+                            insert_sql = "INSERT INTO inspection_job (job_name, job_description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+                    elif 'job_code' in cols and 'description' in cols:
+                        if 'sort_order' in cols:
+                            insert_sql = "INSERT INTO inspection_job (job_code, description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                        else:
+                            insert_sql = "INSERT INTO inspection_job (job_code, description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+                    else:
+                        # Fallback: try a generic insert using job_name/description columns
+                        insert_sql = "INSERT INTO inspection_job (job_name, description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+                    inserted_jobs = 0
+                    pos = 1
                     for name, desc in jobs:
-                        # database.table uses job_name/description columns
-                        cursor.execute("INSERT INTO inspection_job (job_name, description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())", (name, desc))
+                        logger.info(f"Attempting insert into inspection_job: name={name}, desc={desc}")
+                        try:
+                            logger.debug(f"Insert SQL used: {insert_sql}")
+                            # If the schema uses (job_code, job_description), put the name into job_description
+                            if 'job_code' in cols and 'job_description' in cols and 'job_name' not in cols:
+                                # Use None for job_code and use `name` as job_description
+                                if 'sort_order' in cols and '%s, %s, %s' in insert_sql:
+                                    cursor.execute(insert_sql, (None, name, pos))
+                                else:
+                                    cursor.execute(insert_sql, (None, name))
+                            else:
+                                # Otherwise, map name -> job_name, desc -> description
+                                if 'sort_order' in cols and '%s, %s, %s' in insert_sql:
+                                    cursor.execute(insert_sql, (name, desc, pos))
+                                else:
+                                    cursor.execute(insert_sql, (name, desc))
+                            inserted_jobs += 1
+                            # Some cursor implementations populate lastrowid
+                            try:
+                                last_id = cursor.lastrowid
+                                logger.info(f"Inserted inspection_job row: {name} (lastrowid={last_id})")
+                            except Exception:
+                                logger.info(f"Inserted inspection_job row: {name}")
+                        except Exception:
+                            logger.exception(f"inspection_job seed insert failed for row ({name},{desc}) using SQL: {insert_sql}")
+                            # Fallback: try to insert into single columns (if variants exist)
+                            fallback_attempted = False
+                            try:
+                                if 'job_description' in cols and 'job_code' in cols and not fallback_attempted:
+                                    cursor.execute("INSERT INTO inspection_job (job_code, job_description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())", (None, name))
+                                    inserted_jobs += 1
+                                    fallback_attempted = True
+                                    logger.info(f"Inserted (fallback) inspection_job using job_code+job_description for {name}")
+                                if 'job_description' in cols and not fallback_attempted:
+                                    cursor.execute("INSERT INTO inspection_job (job_description, created_at, updated_at) VALUES (%s, NOW(), NOW())", (name,))
+                                    inserted_jobs += 1
+                                    fallback_attempted = True
+                                    logger.info(f"Inserted (fallback) inspection_job using job_description for {name}")
+                                if 'job_name' in cols and not fallback_attempted:
+                                    cursor.execute("INSERT INTO inspection_job (job_name, created_at, updated_at) VALUES (%s, NOW(), NOW())", (name,))
+                                    inserted_jobs += 1
+                                    fallback_attempted = True
+                                    logger.info(f"Inserted (fallback) inspection_job using job_name for {name}")
+                                if 'job_code' in cols and not fallback_attempted:
+                                    cursor.execute("INSERT INTO inspection_job (job_code, created_at, updated_at) VALUES (%s, NOW(), NOW())", (name,))
+                                    inserted_jobs += 1
+                                    fallback_attempted = True
+                                    logger.info(f"Inserted (fallback) inspection_job using job_code for {name}")
+                            except Exception:
+                                logger.exception(f"Fallback inspection_job insert failed for row: {name}")
                     conn2.commit()
-                    logger.info('Seeded inspection_job rows')
+                    # Summary logging
+                    try:
+                        cursor.execute("SELECT COUNT(*) AS cnt FROM inspection_job")
+                        cnt_now = cursor.fetchone().get('cnt', 0)
+                        logger.info(f"Seeded inspection_job rows (total now: {cnt_now}, newly inserted: {inserted_jobs})")
+                        if inserted_jobs == 0:
+                            logger.warning("Warning: inspection_job seeding completed but no rows were inserted. Check permissions, schema, or that another process populated the table.")
+                        # Log the first few rows for verification
+                        try:
+                            cursor.execute("SELECT id, job_code, job_name, job_description, description FROM inspection_job LIMIT 10")
+                            sample_rows = cursor.fetchall() or []
+                            logger.info(f"inspection_job sample rows: {sample_rows}")
+                        except Exception:
+                            logger.debug(traceback.format_exc())
+                    except Exception:
+                        logger.debug(traceback.format_exc())
+                    conn2.commit()
+                    # Print a sample and count for diagnostics
+                    try:
+                        cursor.execute("SELECT COUNT(*) AS cnt FROM inspection_job")
+                        cnt_now = cursor.fetchone().get('cnt', 0)
+                        logger.info(f"Seeded inspection_job rows (total now: {cnt_now})")
+                        safe_select_and_print("inspection_job")
+                    except Exception:
+                        logger.debug(traceback.format_exc())
                 except Exception:
                     logger.warning('Could not seed inspection_job')
                     logger.debug(traceback.format_exc())
@@ -793,10 +913,23 @@ def init_db():
                         ]
                     }
                     for jid, items in sub_jobs.items():
+                        pos = 1
                         for name, desc in items:
-                            cursor.execute("INSERT INTO inspection_sub_job (job_id, sub_job_name, description, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())", (jid, name, desc))
+                            try:
+                                expected_sn = f"{jid}.{pos}"
+                                cursor.execute("INSERT INTO inspection_sub_job (job_id, sub_job_name, sn, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())", (jid, name, expected_sn))
+                            except Exception:
+                                # fallback if `sn` column doesn't exist yet
+                                cursor.execute("INSERT INTO inspection_sub_job (job_id, sub_job_name, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())", (jid, name))
+                            pos += 1
                     conn2.commit()
-                    logger.info('Seeded inspection_sub_job rows')
+                    try:
+                        cursor.execute("SELECT COUNT(*) AS cnt FROM inspection_sub_job")
+                        cnt_now = cursor.fetchone().get('cnt', 0)
+                        logger.info(f"Seeded inspection_sub_job rows (total now: {cnt_now})")
+                        safe_select_and_print("inspection_sub_job")
+                    except Exception:
+                        logger.debug(traceback.format_exc())
                 except Exception:
                     logger.warning('Could not seed inspection_sub_job')
                     logger.debug(traceback.format_exc())
@@ -836,37 +969,46 @@ def init_db():
                 except Exception:
                     conn2.rollback()
 
-            # Populate sub_job_id and sn where NULL: assign position per job (1-based) and sn as '<job_id>.<pos>'
+            # Populate sn where NULL: assign per-job position (1-based) and sn as '<job_id>.<pos>'
             try:
                 cursor.execute("SELECT DISTINCT job_id FROM inspection_sub_job")
                 jobs_in_table = [r.get('job_id') for r in cursor.fetchall() or []]
+                # Detect presence of legacy 'id' column to determine ordering column
+                cursor.execute(
+                    "SELECT COUNT(*) AS cnt FROM information_schema.columns WHERE table_schema=%s AND table_name='inspection_sub_job' AND column_name='id'",
+                    (DB_NAME,)
+                )
+                id_exists = cursor.fetchone().get('cnt', 0) > 0
                 for jid in jobs_in_table:
                     try:
-                        cursor.execute("SELECT id FROM inspection_sub_job WHERE job_id=%s ORDER BY id", (jid,))
+                        if id_exists:
+                            cursor.execute("SELECT id, sub_job_id, sn FROM inspection_sub_job WHERE job_id=%s ORDER BY id", (jid,))
+                        else:
+                            cursor.execute("SELECT sub_job_id, sn FROM inspection_sub_job WHERE job_id=%s ORDER BY sub_job_id", (jid,))
                         rows = cursor.fetchall() or []
                         pos = 1
                         for r in rows:
-                            rid = r.get('id')
-                            # Only update if sub_job_id or sn is NULL
-                            try:
-                                cursor.execute("SELECT sub_job_id, sn FROM inspection_sub_job WHERE id=%s LIMIT 1", (rid,))
-                                curvals = cursor.fetchone() or {}
-                                need_update = False
-                                updates = {}
-                                if curvals.get('sub_job_id') is None:
-                                    updates['sub_job_id'] = pos
-                                    need_update = True
-                                if not curvals.get('sn'):
-                                    updates['sn'] = f"{jid}.{pos}"
-                                    need_update = True
-                                if need_update:
-                                    cursor.execute(
-                                        "UPDATE inspection_sub_job SET sub_job_id=%s, sn=%s, updated_at=NOW() WHERE id=%s",
-                                        (updates.get('sub_job_id'), updates.get('sn'), rid)
-                                    )
+                            rid = r.get('id') if id_exists else r.get('sub_job_id')
+                            cur_sn = r.get('sn')
+                            expected_sn = f"{jid}.{pos}"
+                            need_update = False
+                            if not cur_sn or str(cur_sn).strip() == "" or str(cur_sn).strip() != expected_sn:
+                                need_update = True
+                            if need_update:
+                                try:
+                                    if id_exists:
+                                        cursor.execute(
+                                            "UPDATE inspection_sub_job SET sn=%s, updated_at=NOW() WHERE id=%s",
+                                            (expected_sn, rid)
+                                        )
+                                    else:
+                                        cursor.execute(
+                                            "UPDATE inspection_sub_job SET sn=%s, updated_at=NOW() WHERE sub_job_id=%s",
+                                            (expected_sn, rid)
+                                        )
                                     conn2.commit()
-                            except Exception:
-                                conn2.rollback()
+                                except Exception:
+                                    conn2.rollback()
                             pos += 1
                     except Exception:
                         logger.debug(traceback.format_exc())
@@ -1068,8 +1210,11 @@ def init_db():
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS `inspection_job` (
                         `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                        `job_name` VARCHAR(255) NOT NULL,
+                        `job_code` VARCHAR(32) NULL,
+                        `job_name` VARCHAR(255) NULL,
+                        `job_description` TEXT,
                         `description` TEXT,
+                        `sort_order` INT DEFAULT 0,
                         `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -1081,18 +1226,14 @@ def init_db():
                 logger.debug(traceback.format_exc())
                 conn2.rollback()
 
-            # ---------- CREATE: inspection_sub_job (internal id + per-job sub_job_id + sn) ----------
+            # ---------- CREATE: inspection_sub_job (sub_job_id as primary key) ----------
             try:
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS `inspection_sub_job` (
-                        `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                        `sub_job_id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                         `job_id` INT NOT NULL,
-                        `sub_job_id` INT NULL,
                         `sn` VARCHAR(32) NULL,
                         `sub_job_name` VARCHAR(255) NOT NULL,
-                        `sub_job_description` VARCHAR(512) NULL,
-                        `description` TEXT,
-                        `sort_order` INT DEFAULT 0,
                         `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         KEY `idx_ins_sub_job_job_id` (`job_id`)
@@ -1180,9 +1321,9 @@ def init_db():
                 # the table to be empty on startup per user request. If the table is populated
                 # from a previous run, we will clear it here so that it becomes empty.
                 try:
-                    cursor.execute("DELETE FROM safety_valve_model")
+                    #cursor.execute("DELETE FROM safety_valve_model")
                     conn2.commit()
-                    logger.info("Cleared safety_valve_model table — it is now empty.")
+                    #logger.info("Cleared safety_valve_model table — it is now empty.")
                 except Exception:
                     try:
                         conn2.rollback()
@@ -1192,9 +1333,9 @@ def init_db():
                 # the table to be empty on startup per user request. If the table is populated
                 # from a previous run, we will clear it here so that it becomes empty.
                 try:
-                    cursor.execute("DELETE FROM safety_valve_size")
+                    #cursor.execute("DELETE FROM safety_valve_size")
                     conn2.commit()
-                    logger.info("Cleared safety_valve_size table — it is now empty.")
+                   # logger.info("Cleared safety_valve_size table — it is now empty.")
                 except Exception:
                     try:
                         conn2.rollback()
@@ -1211,6 +1352,127 @@ def init_db():
         except Exception:
             pass
 
+    # Optional: allow automatic reseed on startup if env var is set. Useful for testing.
+    try:
+        if os.getenv('RESEED_INSPECTION_JOB', '0').lower() in ('1', 'true'):
+            logger.info('RESEED_INSPECTION_JOB enabled: forcing inspection_job reseed')
+            reseed_inspection_job(force=True)
+    except Exception:
+        logger.debug(traceback.format_exc())
+
+
+# Call init_db() on module import (keep if desired)
+def reseed_inspection_job(force=False):
+    """
+    Admin utility: Re-run inspection_job seeding at runtime.
+    Use `force=True` to insert rows regardless of existing rows count.
+    """
+    try:
+        conn2 = get_db_connection(use_db=True)
+    except Exception:
+        logger.error("Could not connect to DB to reseed inspection_job")
+        logger.debug(traceback.format_exc())
+        return
+    try:
+        with conn2.cursor() as cursor:
+            try:
+                cursor.execute("SELECT COUNT(*) AS cnt FROM inspection_job")
+                cnt = cursor.fetchone().get('cnt', 0)
+            except Exception:
+                cnt = 0
+            if cnt > 0 and not force:
+                logger.info("inspection_job already contains rows; skipping reseed (use force=True to override)")
+                return
+            # Same seeding logic as init_db: minimal headlist
+            jobs = [
+                ('Tank Body & Frame Condition', ''),
+                ('Pipework & Installation', ''),
+                ('Tank Instrument & Assembly', ''),
+                ('Valves Tightness & Operation', ''),
+                ('Before Departure Check', ''),
+                ('Others Observation & Comment', ''),
+            ]
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=%s AND table_name='inspection_job'", (DB_NAME,))
+            raw_cols = cursor.fetchall() or []
+            parsed_cols = set()
+            for r in raw_cols:
+                col_val = None
+                if isinstance(r, dict):
+                    for v in r.values():
+                        if v is not None:
+                            col_val = v
+                            break
+                elif isinstance(r, (list, tuple)) and len(r) > 0:
+                    col_val = r[0]
+                else:
+                    col_val = r
+                if col_val:
+                    parsed_cols.add(str(col_val).lower())
+            cols = parsed_cols
+            logger.info(f"(reseed) inspection_job columns detected (raw={raw_cols}): {cols}")
+            insert_sql = None
+            if 'job_name' in cols and 'description' in cols:
+                if 'sort_order' in cols:
+                    insert_sql = "INSERT INTO inspection_job (job_name, description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                else:
+                    insert_sql = "INSERT INTO inspection_job (job_name, description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+            elif 'job_code' in cols and 'job_description' in cols:
+                if 'sort_order' in cols:
+                    insert_sql = "INSERT INTO inspection_job (job_code, job_description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                else:
+                    insert_sql = "INSERT INTO inspection_job (job_code, job_description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+            elif 'job_name' in cols and 'job_description' in cols:
+                if 'sort_order' in cols:
+                    insert_sql = "INSERT INTO inspection_job (job_name, job_description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                else:
+                    insert_sql = "INSERT INTO inspection_job (job_name, job_description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+            elif 'job_code' in cols and 'description' in cols:
+                if 'sort_order' in cols:
+                    insert_sql = "INSERT INTO inspection_job (job_code, description, sort_order, created_at, updated_at) VALUES (%s, %s, %s, NOW(), NOW())"
+                else:
+                    insert_sql = "INSERT INTO inspection_job (job_code, description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+            else:
+                insert_sql = "INSERT INTO inspection_job (job_name, description, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())"
+            inserted_jobs = 0
+            pos = 1
+            for name, desc in jobs:
+                try:
+                    if 'job_code' in cols and 'job_description' in cols and 'job_name' not in cols:
+                        # Put the label into job_description and leave job_code NULL
+                        if 'sort_order' in cols and '%s, %s, %s' in insert_sql:
+                            cursor.execute(insert_sql, (None, name, pos))
+                        else:
+                            cursor.execute(insert_sql, (None, name))
+                    else:
+                        if 'sort_order' in cols and '%s, %s, %s' in insert_sql:
+                            cursor.execute(insert_sql, (name, desc, pos))
+                        else:
+                            cursor.execute(insert_sql, (name, desc))
+                    inserted_jobs += 1
+                except Exception:
+                    logger.exception(f"(reseed) inspection_job insert failed for {name}")
+                    try:
+                        if 'job_description' in cols:
+                            cursor.execute("INSERT INTO inspection_job (job_description, created_at, updated_at) VALUES (%s, NOW(), NOW())", (name,))
+                            inserted_jobs += 1
+                        elif 'job_name' in cols:
+                            cursor.execute("INSERT INTO inspection_job (job_name, created_at, updated_at) VALUES (%s, NOW(), NOW())", (name,))
+                            inserted_jobs += 1
+                    except Exception:
+                        logger.exception(f"(reseed) fallback insertion also failed for {name}")
+                pos += 1
+            conn2.commit()
+            try:
+                cursor.execute("SELECT COUNT(*) AS cnt FROM inspection_job")
+                cnt_now = cursor.fetchone().get('cnt', 0)
+                logger.info(f"Reseeded inspection_job rows (total now: {cnt_now}, newly inserted: {inserted_jobs})")
+            except Exception:
+                logger.debug(traceback.format_exc())
+    finally:
+        try:
+            conn2.close()
+        except Exception:
+            pass
 
 # Call init_db() on module import (keep if desired)
 init_db()

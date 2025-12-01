@@ -6,7 +6,8 @@ from app.database import Base
 class InspectionJob(Base):
     __tablename__ = "inspection_job"
 
-    job_id = Column(Integer, primary_key=True, autoincrement=True)
+    # Map Python attr 'job_id' to DB column 'id' (some DB schemas use 'id' as PK)
+    job_id = Column('id', Integer, primary_key=True, autoincrement=True)
     job_code = Column(String(32), nullable=True)
     job_description = Column(String(255), nullable=False)
     sort_order = Column(Integer, default=0)
